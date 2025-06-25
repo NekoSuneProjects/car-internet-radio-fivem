@@ -47,7 +47,7 @@ car_radio_system/
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/your-username/car_radio_system.git
+git clone --recurse-submodules https://github.com/NekoSuneProjects/car_radio_system.git
 cd car_radio_system
 ```
 
