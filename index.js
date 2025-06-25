@@ -93,12 +93,12 @@ const RadioStation = sequelize.define('RadioStation', {
     timestamps: false
 });
 
-// Initialize database and create default admin
+// Initialize database and create default admin if it doesn't exist
 async function initializeDatabase() {
     try {
-        await sequelize.sync({ force: true }); // Create tables, drop if exist
-        const adminCount = await User.count();
-        if (adminCount === 0) {
+        await sequelize.sync(); // Create tables if they don't exist, preserve data
+        const adminUser = await User.findOne({ where: { username: 'admin' } });
+        if (!adminUser) {
             const tempPassword = crypto.randomBytes(8).toString('hex'); // Generate random 16-char password
             const hashedPassword = await bcrypt.hash(tempPassword, 12);
             await User.create({
