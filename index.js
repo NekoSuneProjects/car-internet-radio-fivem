@@ -323,9 +323,7 @@ app.get('/admin/settings', authenticateJWT, async (req, res) => {
 // Get all radio stations (global + user-specific if authenticated)
 app.get('/radio', async (req, res) => {
     try {
-        const whereClause = req.user.global_radios_enabled
-            ? { enabled: true }
-            : { enabled: true, user_id: req.user.id, is_global: false };
+        const whereClause = { enabled: true, is_global: true }
         const radios = await RadioStation.findAll({
             where: whereClause,
             attributes: ['id', 'name', 'stream_url', 'now_playing_api', 'enabled', 'user_id', 'is_global'],
@@ -335,7 +333,7 @@ app.get('/radio', async (req, res) => {
             name: radio.name,
             url: radio.stream_url,
             song: "Coming SOON!",
-            owner: radio.is_global ? 'Global' : (radio.user_id ? radio.User?.username : 'Unknown')
+            owner: 'Global'
         })));
     } catch (error) {
         console.error('Error fetching radio stations:', error);
