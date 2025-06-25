@@ -2,6 +2,8 @@ const { useState, useEffect } = React;
 
 const App = () => {
     const [token, setToken] = useState(localStorage.getItem('token'));
+    const [role, setRole] = useState(null);
+    const [userId, setUserId] = useState(null);
     const [mustChangePassword, setMustChangePassword] = useState(false);
     const [loginData, setLoginData] = useState({ username: '', password: '' });
     const [changePasswordData, setChangePasswordData] = useState({ newPassword: '', confirmPassword: '' });
@@ -10,8 +12,9 @@ const App = () => {
     const [newRadio, setNewRadio] = useState({ name: '', stream_url: '', now_playing_api: '', enabled: true });
     const [editingRadioId, setEditingRadioId] = useState(null);
     const [users, setUsers] = useState([]);
-    const [newUser, setNewUser] = useState({ username: '', password: '', enabled: true });
+    const [newUser, setNewUser] = useState({ username: '', password: '', enabled: true, role: 'user' });
     const [editingUserId, setEditingUserId] = useState(null);
+    const [settings, setSettings] = useState({ global_radios_enabled: true });
     const [error, setError] = useState('');
 
     // Set axios default headers
@@ -23,18 +26,33 @@ const App = () => {
         }
     }, [token]);
 
-    // Check token validity
+    // Check token validity and fetch initial data
     useEffect(() => {
         if (token && view === 'login') {
             axios.get('/admin/radios').then(response => {
                 setView('dashboard');
+                setRadios(response.data);
+                if (role === 'admin') {
+                    fetchUsers();
+                }
+                // Decode token to get role and userId
+                const decoded = JSON.parse(atob(token.split('.')[1]));
+                setRole(decoded.role);
+                setUserId(decoded.id);
+                setMustChangePassword(decoded.mustChangePassword);
+                // Fetch settings
+                axios.get('/admin/settings').then(res => {
+                    setSettings({ global_radios_enabled: res.data.global_radios_enabled });
+                }).catch(() => {
+                    setError('Failed to fetch settings');
+                });
             }).catch(() => {
                 localStorage.removeItem('token');
                 setToken(null);
                 setView('login');
             });
         }
-    }, [token]);
+    }, [token, role]);
 
     // Handle login
     const handleLogin = async (e) => {
@@ -44,26 +62,42 @@ const App = () => {
             const response = await axios.post('/admin/login', loginData);
             localStorage.setItem('token', response.data.token);
             setToken(response.data.token);
+            setRole(response.data.role);
+            setUserId(response.data.id);
             setMustChangePassword(response.data.mustChangePassword);
             setView(response.data.mustChangePassword ? 'changePassword' : 'dashboard');
             setLoginData({ username: '', password: '' });
+            fetchRadios();
+            if (response.data.role === 'admin') {
+                fetchUsers();
+            }
+            // Fetch settings
+            const settingsRes = await axios.get('/admin/settings');
+            setSettings({ global_radios_enabled: settingsRes.data.global_radios_enabled });
         } catch (error) {
-            // Replaced optional chaining with traditional property access
-            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Server error');
+            setError(error.response && error.response.data && error.response.data.error
+                ? error.response.data.error : 'Server error');
         }
     };
 
     // Handle password change
     const handleChangePassword = async (e) => {
         e.preventDefault();
+        setError('');
+        if (changePasswordData.newPassword !== changePasswordData.confirmPassword) {
+            return setError('Passwords do not match');
+        }
+        if (changePasswordData.newPassword.length < 8) {
+            return setError('Password must be at least 8 characters');
+        }
         try {
             await axios.post('/admin/change-password', { newPassword: changePasswordData.newPassword });
             setMustChangePassword(false);
             setView('dashboard');
             setChangePasswordData({ newPassword: '', confirmPassword: '' });
         } catch (error) {
-            // Replaced optional chaining with traditional property access
-            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Server error');
+            setError(error.response && error.response.data && error.response.data.error
+                ? error.response.data.error : 'Server error');
         }
     };
 
@@ -73,8 +107,8 @@ const App = () => {
             const response = await axios.get('/admin/radios');
             setRadios(response.data);
         } catch (error) {
-            // Replaced optional chaining with traditional property access
-            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to fetch radios');
+            setError(error.response && error.response.data && error.response.data.error
+                ? error.response.data.error : 'Failed to fetch radios');
         }
     };
 
@@ -84,8 +118,8 @@ const App = () => {
             const response = await axios.get('/admin/users');
             setUsers(response.data);
         } catch (error) {
-            // Replaced optional chaining with traditional property access
-            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to fetch users');
+            setError(error.response && error.response.data && error.response.data.error
+                ? error.response.data.error : 'Failed to fetch users');
         }
     };
 
@@ -103,8 +137,8 @@ const App = () => {
             setNewRadio({ name: '', stream_url: '', now_playing_api: '', enabled: true });
             fetchRadios();
         } catch (error) {
-            // Replaced optional chaining with traditional property access
-            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to save radio');
+            setError(error.response && error.response.data && error.response.data.error
+                ? error.response.data.error : 'Failed to save radio');
         }
     };
 
@@ -117,18 +151,35 @@ const App = () => {
         }
         try {
             if (editingUserId) {
-                const updateData = { username: newUser.username, enabled: newUser.enabled };
+                const updateData = {
+                    username: newUser.username,
+                    enabled: newUser.enabled,
+                    role: newUser.role
+                };
                 if (newUser.password) updateData.password = newUser.password;
                 await axios.put(`/admin/users/${editingUserId}`, updateData);
                 setEditingUserId(null);
             } else {
                 await axios.post('/admin/users', newUser);
             }
-            setNewUser({ username: '', password: '', enabled: true });
+            setNewUser({ username: '', password: '', enabled: true, role: 'user' });
             fetchUsers();
         } catch (error) {
-            // Replaced optional chaining with traditional property access
-            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to save user');
+            setError(error.response && error.response.data && error.response.data.error
+                ? error.response.data.error : 'Failed to save user');
+        }
+    };
+
+    // Handle settings update
+    const handleSettingsSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        try {
+            await axios.patch('/admin/settings', settings);
+            setError('Settings updated successfully');
+        } catch (error) {
+            setError(error.response && error.response.data && error.response.data.error
+                ? error.response.data.error : 'Failed to update settings');
         }
     };
 
@@ -140,8 +191,8 @@ const App = () => {
                 await axios.delete(`/admin/radios/${id}`);
                 fetchRadios();
             } catch (error) {
-                // Replaced optional chaining with traditional property access
-                setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to delete radio');
+                setError(error.response && error.response.data && error.response.data.error
+                    ? error.response.data.error : 'Failed to delete radio');
             }
         }
     };
@@ -154,8 +205,8 @@ const App = () => {
                 await axios.delete(`/admin/users/${id}`);
                 fetchUsers();
             } catch (error) {
-                // Replaced optional chaining with traditional property access
-                setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to delete user');
+                setError(error.response && error.response.data && error.response.data.error
+                    ? error.response.data.error : 'Failed to delete user');
             }
         }
     };
@@ -176,7 +227,8 @@ const App = () => {
         setNewUser({
             username: user.username,
             password: '',
-            enabled: user.enabled
+            enabled: user.enabled,
+            role: user.role
         });
         setEditingUserId(user.id);
     };
@@ -208,10 +260,20 @@ const App = () => {
         setChangePasswordData(prev => ({ ...prev, [name]: value }));
     };
 
+    const handleSettingsChange = (e) => {
+        const { name, checked } = e.target;
+        setSettings(prev => ({
+            ...prev,
+            [name]: checked
+        }));
+    };
+
     // Logout
     const handleLogout = () => {
         localStorage.removeItem('token');
         setToken(null);
+        setRole(null);
+        setUserId(null);
         setView('login');
         setMustChangePassword(false);
     };
@@ -341,42 +403,74 @@ const App = () => {
                             </button>
                         </form>
                     </div>
+                    {role === 'admin' && (
+                        <div className="mb-8 bg-gray-800 p-6 rounded-lg shadow-lg">
+                            <h2 className="text-xl font-semibold mb-4">{editingUserId ? 'Edit User' : 'Add User'}</h2>
+                            <form onSubmit={handleUserSubmit} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <input
+                                    name="username"
+                                    value={newUser.username}
+                                    onChange={handleUserChange}
+                                    type="text"
+                                    placeholder="Username"
+                                    className="p-2 bg-gray-700 border border-gray-600 rounded text-white transition-all"
+                                    required
+                                />
+                                <input
+                                    name="password"
+                                    value={newUser.password}
+                                    onChange={handleUserChange}
+                                    type="password"
+                                    placeholder={editingUserId ? 'New Password (optional)' : 'Password'}
+                                    className="p-2 bg-gray-700 border border-gray-600 rounded text-white transition-all"
+                                    required={!editingUserId}
+                                />
+                                <label className="flex items-center">
+                                    <input
+                                        name="enabled"
+                                        type="checkbox"
+                                        checked={newUser.enabled}
+                                        onChange={handleUserChange}
+                                        className="mr-2"
+                                    />
+                                    <span>Enabled</span>
+                                </label>
+                                <select
+                                    name="role"
+                                    value={newUser.role}
+                                    onChange={handleUserChange}
+                                    className="p-2 bg-gray-700 border border-gray-600 rounded text-white transition-all"
+                                >
+                                    <option value="user">User</option>
+                                    <option value="admin">Admin</option>
+                                </select>
+                                <button
+                                    type="submit"
+                                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all col-span-1 sm:col-span-2"
+                                >
+                                    {editingUserId ? 'Update User' : 'Add User'}
+                                </button>
+                            </form>
+                        </div>
+                    )}
                     <div className="mb-8 bg-gray-800 p-6 rounded-lg shadow-lg">
-                        <h2 className="text-xl font-semibold mb-4">{editingUserId ? 'Edit User' : 'Add User'}</h2>
-                        <form onSubmit={handleUserSubmit} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <input
-                                name="username"
-                                value={newUser.username}
-                                onChange={handleUserChange}
-                                type="text"
-                                placeholder="Username"
-                                className="p-2 bg-gray-700 border border-gray-600 rounded text-white transition-all"
-                                required
-                            />
-                            <input
-                                name="password"
-                                value={newUser.password}
-                                onChange={handleUserChange}
-                                type="password"
-                                placeholder={editingUserId ? 'New Password (optional)' : 'Password'}
-                                className="p-2 bg-gray-700 border border-gray-600 rounded text-white transition-all"
-                                required={!editingUserId}
-                            />
+                        <h2 className="text-xl font-semibold mb-4">Settings</h2>
+                        <form onSubmit={handleSettingsSubmit} className="space-y-4">
                             <label className="flex items-center">
                                 <input
-                                    name="enabled"
+                                    name="global_radios_enabled"
                                     type="checkbox"
-                                    checked={newUser.enabled}
-                                    onChange={handleUserChange}
+                                    checked={settings.global_radios_enabled}
+                                    onChange={handleSettingsChange}
                                     className="mr-2"
                                 />
-                                <span>Enabled</span>
+                                <span>Show Global Radios</span>
                             </label>
                             <button
                                 type="submit"
-                                className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all col-span-1 sm:col-span-2"
+                                className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all"
                             >
-                                {editingUserId ? 'Update User' : 'Add User'}
+                                Save Settings
                             </button>
                         </form>
                     </div>
@@ -390,6 +484,7 @@ const App = () => {
                                         <p className="text-sm">Stream: {radio.stream_url}</p>
                                         <p className="text-sm">API: {radio.now_playing_api || 'None'}</p>
                                         <p className="text-sm">Status: {radio.enabled ? 'Enabled' : 'Disabled'}</p>
+                                        <p className="text-sm">Owner: {radio.owner}</p>
                                     </div>
                                     <div className="flex space-x-2 mt-2 sm:mt-0">
                                         <button
@@ -409,36 +504,40 @@ const App = () => {
                             ))}
                         </div>
                     </div>
-                    <div>
-                        <h2 className="text-xl font-semibold mb-4">Users</h2>
-                        <div className="grid gap-4">
-                            {users.map(user => (
-                                <div key={user.id} className="bg-gray-800 p-4 rounded-lg shadow-lg flex flex-col sm:flex-row justify-between items-center">
-                                    <div>
-                                        <h3 className="text-lg font-semibold">{user.username}</h3>
-                                        <p className="text-sm">Status: {user.enabled ? 'Enabled' : 'Disabled'}</p>
-                                        <p className="text-sm">Must Change Password: {user.must_change_password ? 'Yes' : 'No'}</p>
+                    {role === 'admin' && (
+                        <div>
+                            <h2 className="text-xl font-semibold mb-4">Users</h2>
+                            <div className="grid gap-4">
+                                {users.map(user => (
+                                    <div key={user.id} className="bg-gray-800 p-4 rounded-lg shadow-lg flex flex-col sm:flex-row justify-between items-center">
+                                        <div>
+                                            <h3 className="text-lg font-semibold">{user.username}</h3>
+                                            <p className="text-sm">Status: {user.enabled ? 'Enabled' : 'Disabled'}</p>
+                                            <p className="text-sm">Must Change Password: {user.must_change_password ? 'Yes' : 'No'}</p>
+                                            <p className="text-sm">Role: {user.role}</p>
+                                            <p className="text-sm">Global Radios: {user.global_radios_enabled ? 'Enabled' : 'Disabled'}</p>
+                                        </div>
+                                        <div className="flex space-x-2 mt-2 sm:mt-0">
+                                            <button
+                                                onClick={() => handleUserEdit(user)}
+                                                className="bg-yellow-600 hover:bg-yellow-700 text-white p-2 rounded transition-all"
+                                                disabled={user.username === 'admin'}
+                                            >
+                                                <i className="fas fa-edit"></i>
+                                            </button>
+                                            <button
+                                                onClick={() => handleUserDelete(user.id)}
+                                                className="bg-red-600 hover:bg-red-700 text-white p-2 rounded transition-all"
+                                                disabled={user.username === 'admin'}
+                                            >
+                                                <i className="fas fa-trash"></i>
+                                            </button>
+                                        </div>
                                     </div>
-                                    <div className="flex space-x-2 mt-2 sm:mt-0">
-                                        <button
-                                            onClick={() => handleUserEdit(user)}
-                                            className="bg-yellow-600 hover:bg-yellow-700 text-white p-2 rounded transition-all"
-                                            disabled={user.username === 'admin'}
-                                        >
-                                            <i className="fas fa-edit"></i>
-                                        </button>
-                                        <button
-                                            onClick={() => handleUserDelete(user.id)}
-                                            className="bg-red-600 hover:bg-red-700 text-white p-2 rounded transition-all"
-                                            disabled={user.username === 'admin'}
-                                        >
-                                            <i className="fas fa-trash"></i>
-                                        </button>
-                                    </div>
-                                </div>
-                            ))}
+                                ))}
+                            </div>
                         </div>
-                    </div>
+                    )}
                 </div>
             )}
         </div>

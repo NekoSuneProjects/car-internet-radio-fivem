@@ -45,6 +45,11 @@ const User = sequelize.define('User', {
         allowNull: false,
         validate: { len: [8, 100] }
     },
+    role: {
+        type: DataTypes.ENUM('admin', 'user'),
+        allowNull: false,
+        defaultValue: 'user'
+    },
     must_change_password: {
         type: DataTypes.BOOLEAN,
         defaultValue: false
@@ -59,6 +64,10 @@ const User = sequelize.define('User', {
     },
     lockout_until: {
         type: DataTypes.DATE
+    },
+    global_radios_enabled: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: true
     }
 }, {
     tableName: 'users',
@@ -87,25 +96,39 @@ const RadioStation = sequelize.define('RadioStation', {
         type: DataTypes.BOOLEAN,
         allowNull: false,
         defaultValue: true
+    },
+    user_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+            model: User,
+            key: 'id'
+        }
     }
 }, {
     tableName: 'radio_stations',
     timestamps: false
 });
 
+// Define relationships
+User.hasMany(RadioStation, { foreignKey: 'user_id' });
+RadioStation.belongsTo(User, { foreignKey: 'user_id' });
+
 // Initialize database and create default admin if it doesn't exist
 async function initializeDatabase() {
     try {
-        await sequelize.sync(); // Create tables if they don't exist, preserve data
+        await sequelize.sync();
         const adminUser = await User.findOne({ where: { username: 'admin' } });
         if (!adminUser) {
-            const tempPassword = crypto.randomBytes(8).toString('hex'); // Generate random 16-char password
+            const tempPassword = crypto.randomBytes(8).toString('hex');
             const hashedPassword = await bcrypt.hash(tempPassword, 12);
             await User.create({
                 username: 'admin',
                 password: hashedPassword,
+                role: 'admin',
                 must_change_password: true,
-                enabled: true
+                enabled: true,
+                global_radios_enabled: true
             });
             console.log(`Default admin account created:
                 Username: admin
@@ -126,11 +149,11 @@ app.use(helmet({
             styleSrc: ["'self'", "'unsafe-inline'", 'https://cdn.jsdelivr.net'],
             scriptSrc: [
                 "'self'",
-                "'unsafe-inline'", // Required for React and Babel in this setup
+                "'unsafe-inline'",
                 'https://cdn.jsdelivr.net/npm/react@17.0.2',
                 'https://cdn.jsdelivr.net/npm/react-dom@17.0.2',
                 'https://cdn.jsdelivr.net/npm/axios@1.4.0',
-                'https://cdn.jsdelivr.net/npm/babel-standalone@6.26.0'
+                'https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.7'
             ],
             imgSrc: ["'self'", 'data:'],
             connectSrc: ["'self'", `http://localhost:${port}`, 'https://cdn.jsdelivr.net'],
@@ -144,20 +167,20 @@ app.use(cors({ origin: `http://localhost:${port}`, credentials: true }));
 app.use(express.json());
 app.use('/admin', express.static(path.join(__dirname, 'admin')));
 
-// Serve favicon (optional: add favicon.ico to backend/ or return 204)
+// Serve favicon
 app.get('/favicon.ico', (req, res) => {
     const faviconPath = path.join(__dirname, 'favicon.ico');
     if (fs.existsSync(faviconPath)) {
         res.sendFile(faviconPath);
     } else {
-        res.status(204).end(); // No content
+        res.status(204).end();
     }
 });
 
 // Rate limiter for login attempts
 const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5, // Limit to 5 requests per window
+    windowMs: 15 * 60 * 1000,
+    max: 5,
     message: 'Too many login attempts, please try again later.'
 });
 
@@ -173,7 +196,7 @@ const authenticateJWT = async (req, res, next) => {
         if (!user || !user.enabled || (user.lockout_until && user.lockout_until > new Date())) {
             return res.status(403).json({ error: 'Access denied' });
         }
-        req.user = decoded;
+        req.user = { ...decoded, id: user.id, role: user.role, global_radios_enabled: user.global_radios_enabled };
         next();
     } catch (error) {
         res.status(403).json({ error: 'Invalid token' });
@@ -197,13 +220,18 @@ app.post('/admin/login', loginLimiter, async (req, res) => {
         if (!await bcrypt.compare(password, user.password)) {
             await user.increment('failed_attempts');
             if (user.failed_attempts >= 4) {
-                await user.update({ lockout_until: new Date(Date.now() + 15 * 60 * 1000) }); // Lock for 15 minutes
+                await user.update({ lockout_until: new Date(Date.now() + 15 * 60 * 1000) });
             }
             return res.status(401).json({ error: 'Invalid credentials' });
         }
         await user.update({ failed_attempts: 0, lockout_until: null });
-        const token = jwt.sign({ username, mustChangePassword: user.must_change_password }, JWT_SECRET, { expiresIn: '7d' });
-        res.json({ token, mustChangePassword: user.must_change_password });
+        const token = jwt.sign({
+            username,
+            mustChangePassword: user.must_change_password,
+            role: user.role,
+            id: user.id
+        }, JWT_SECRET, { expiresIn: '7d' });
+        res.json({ token, mustChangePassword: user.must_change_password, role: user.role });
     } catch (error) {
         console.error('Error logging in:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -228,16 +256,68 @@ app.post('/admin/change-password', authenticateJWT, async (req, res) => {
     }
 });
 
-// Get all radio stations (only enabled for clients)
-app.get('/radios', async (req, res) => {
+// Update user settings (toggle global radios)
+app.patch('/admin/settings', authenticateJWT, async (req, res) => {
+    const { global_radios_enabled } = req.body;
+    if (typeof global_radios_enabled !== 'boolean') {
+        return res.status(400).json({ error: 'Invalid global_radios_enabled value' });
+    }
     try {
+        const user = await User.findByPk(req.user.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        await user.update({ global_radios_enabled });
+        res.json({ message: 'Settings updated successfully', global_radios_enabled });
+    } catch (error) {
+        console.error('Error updating settings:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Get all radio stations (global + user-specific if authenticated)
+app.get('/radios', authenticateJWT, async (req, res) => {
+    try {
+        const whereClause = req.user.global_radios_enabled
+            ? { enabled: true }
+            : { enabled: true, user_id: req.user.id };
         const radios = await RadioStation.findAll({
-            where: { enabled: true },
-            attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api']]
+            where: whereClause,
+            attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api'], 'user_id'],
+            include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
-        res.json(radios);
+        res.json(radios.map(radio => ({
+            name: radio.name,
+            url: radio.url,
+            api: radio.api,
+            owner: radio.user_id ? radio.User?.username : 'Global'
+        })));
     } catch (error) {
         console.error('Error fetching radio stations:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Get radio stations for a specific user (public endpoint)
+app.get('/radio/:username', async (req, res) => {
+    const { username } = req.params;
+    try {
+        const user = await User.findOne({ where: { username, enabled: true } });
+        if (!user) return res.status(404).json({ error: 'User not found or disabled' });
+        const whereClause = user.global_radios_enabled
+            ? { enabled: true }
+            : { enabled: true, user_id: user.id };
+        const radios = await RadioStation.findAll({
+            where: whereClause,
+            attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api'], 'user_id'],
+            include: [{ model: User, attributes: ['username'], as: 'User' }]
+        });
+        res.json(radios.map(radio => ({
+            name: radio.name,
+            url: radio.url,
+            api: radio.api,
+            owner: radio.user_id ? radio.User?.username : 'Global'
+        })));
+    } catch (error) {
+        console.error('Error fetching user radio stations:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -271,13 +351,25 @@ app.get('/radio', async (req, res) => {
     }
 });
 
-// Admin: Get all radio stations
+// Admin: Get all radio stations (filtered by user role)
 app.get('/admin/radios', authenticateJWT, async (req, res) => {
     try {
+        const whereClause = req.user.role === 'admin'
+            ? {}
+            : { user_id: req.user.id };
         const radios = await RadioStation.findAll({
-            attributes: ['id', 'name', 'stream_url', 'now_playing_api', 'enabled']
+            where: whereClause,
+            attributes: ['id', 'name', 'stream_url', 'now_playing_api', 'enabled', 'user_id'],
+            include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
-        res.json(radios);
+        res.json(radios.map(radio => ({
+            id: radio.id,
+            name: radio.name,
+            stream_url: radio.stream_url,
+            now_playing_api: radio.now_playing_api,
+            enabled: radio.enabled,
+            owner: radio.user_id ? radio.User?.username : 'Global'
+        })));
     } catch (error) {
         console.error('Error fetching admin radio stations:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -288,12 +380,16 @@ app.get('/admin/radios', authenticateJWT, async (req, res) => {
 app.post('/admin/radios', authenticateJWT, async (req, res) => {
     const { name, stream_url, now_playing_api, enabled } = req.body;
     try {
-        const radio = await RadioStation.create({
+        const radioData = {
             name,
             stream_url,
             now_playing_api: now_playing_api || null,
             enabled: enabled !== undefined ? enabled : true
-        });
+        };
+        if (req.user.role === 'user') {
+            radioData.user_id = req.user.id;
+        }
+        const radio = await RadioStation.create(radioData);
         res.status(201).json(radio);
     } catch (error) {
         console.error('Error adding radio station:', error);
@@ -309,6 +405,9 @@ app.put('/admin/radios/:id', authenticateJWT, async (req, res) => {
         const radio = await RadioStation.findByPk(id);
         if (!radio) {
             return res.status(404).json({ error: 'Radio not found' });
+        }
+        if (req.user.role === 'user' && radio.user_id !== req.user.id) {
+            return res.status(403).json({ error: 'Unauthorized to edit this radio' });
         }
         await radio.update({
             name,
@@ -331,6 +430,9 @@ app.delete('/admin/radios/:id', authenticateJWT, async (req, res) => {
         if (!radio) {
             return res.status(404).json({ error: 'Radio not found' });
         }
+        if (req.user.role === 'user' && radio.user_id !== req.user.id) {
+            return res.status(403).json({ error: 'Unauthorized to delete this radio' });
+        }
         await radio.destroy();
         res.status(204).send();
     } catch (error) {
@@ -341,9 +443,12 @@ app.delete('/admin/radios/:id', authenticateJWT, async (req, res) => {
 
 // Admin: Get all users
 app.get('/admin/users', authenticateJWT, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
     try {
         const users = await User.findAll({
-            attributes: ['id', 'username', 'enabled', 'must_change_password']
+            attributes: ['id', 'username', 'enabled', 'must_change_password', 'role', 'global_radios_enabled']
         });
         res.json(users);
     } catch (error) {
@@ -354,9 +459,15 @@ app.get('/admin/users', authenticateJWT, async (req, res) => {
 
 // Admin: Add user
 app.post('/admin/users', authenticateJWT, async (req, res) => {
-    const { username, password, enabled } = req.body;
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+    const { username, password, enabled, role } = req.body;
     if (password.length < 8) {
         return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+    if (!['admin', 'user'].includes(role)) {
+        return res.status(400).json({ error: 'Invalid role' });
     }
     try {
         const hashedPassword = await bcrypt.hash(password, 12);
@@ -364,7 +475,9 @@ app.post('/admin/users', authenticateJWT, async (req, res) => {
             username,
             password: hashedPassword,
             must_change_password: true,
-            enabled: enabled !== undefined ? enabled : true
+            enabled: enabled !== undefined ? enabled : true,
+            role,
+            global_radios_enabled: true
         });
         res.status(201).json(user);
     } catch (error) {
@@ -375,8 +488,14 @@ app.post('/admin/users', authenticateJWT, async (req, res) => {
 
 // Admin: Update user
 app.put('/admin/users/:id', authenticateJWT, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
     const { id } = req.params;
-    const { username, password, enabled, must_change_password } = req.body;
+    const { username, password, enabled, must_change_password, role, global_radios_enabled } = req.body;
+    if (!['admin', 'user'].includes(role)) {
+        return res.status(400).json({ error: 'Invalid role' });
+    }
     try {
         const user = await User.findByPk(id);
         if (!user) {
@@ -385,7 +504,7 @@ app.put('/admin/users/:id', authenticateJWT, async (req, res) => {
         if (user.username === 'admin' && req.user.username !== 'admin') {
             return res.status(403).json({ error: 'Cannot modify default admin' });
         }
-        const updates = { username, enabled, must_change_password };
+        const updates = { username, enabled, must_change_password, role, global_radios_enabled };
         if (password) {
             if (password.length < 8) {
                 return res.status(400).json({ error: 'Password must be at least 8 characters' });
@@ -402,6 +521,9 @@ app.put('/admin/users/:id', authenticateJWT, async (req, res) => {
 
 // Admin: Delete user
 app.delete('/admin/users/:id', authenticateJWT, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
     const { id } = req.params;
     try {
         const user = await User.findByPk(id);

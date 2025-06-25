@@ -1,19 +1,24 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Car Radio Admin Panel</title>
-    <link href="tailwind.min.css" rel="stylesheet">
-    <link href="all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
-</head>
-<body class="bg-gray-900 text-white min-h-screen">
-    <div id="app"></div>
-    <script src="react.production.min.js"></script>
-    <script src="react-dom.production.min.js"></script>
-    <script src="axios.min.js"></script>
-    <script src="babel.min.js"></script>
-    <script type="text/babel" src="script.js?v1"></script>
-</body>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Car Radio Admin Panel</title>
+        <link href="tailwind.min.css" rel="stylesheet">
+        <link href="all.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="style.css">
+    </head>
+    <body class="bg-gray-900 text-white min-h-screen">
+        <div id="app"></div>
+        <script src="react.production.min.js"></script>
+        <script src="react-dom.production.min.js"></script>
+        <script src="axios.min.js"></script>
+        <script src="babel.min.js"></script>
+        <script>
+            const script = document.createElement('script');
+            script.type = 'text/babel';
+            script.src = `script.js?v=${Date.now()}`; // appends current timestamp
+            document.body.appendChild(script);
+        </script>
+    </body>
 </html>
