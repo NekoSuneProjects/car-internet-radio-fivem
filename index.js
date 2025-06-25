@@ -321,7 +321,7 @@ app.get('/admin/settings', authenticateJWT, async (req, res) => {
 });
 
 // Get all radio stations (global + user-specific if authenticated)
-app.get('/radios', authenticateJWT, async (req, res) => {
+app.get('/radio', async (req, res) => {
     try {
         const whereClause = req.user.global_radios_enabled
             ? { enabled: true }
@@ -371,7 +371,7 @@ app.get('/radio/:username', async (req, res) => {
 });
 
 // Get song data for a specific radio URL
-app.get('/radio', async (req, res) => {
+app.get('/radionp', async (req, res) => {
     const url = req.query.url;
     try {
         const radio = await RadioStation.findOne({
