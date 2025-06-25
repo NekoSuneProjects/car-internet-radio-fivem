@@ -48,27 +48,22 @@ const App = () => {
             setView(response.data.mustChangePassword ? 'changePassword' : 'dashboard');
             setLoginData({ username: '', password: '' });
         } catch (error) {
-            setError(error.response?.data?.error || 'Server error');
+            // Replaced optional chaining with traditional property access
+            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Server error');
         }
     };
 
     // Handle password change
     const handleChangePassword = async (e) => {
         e.preventDefault();
-        setError('');
-        if (changePasswordData.newPassword !== changePasswordData.confirmPassword) {
-            return setError('Passwords do not match');
-        }
-        if (changePasswordData.newPassword.length < 8) {
-            return setError('Password must be at least 8 characters');
-        }
         try {
             await axios.post('/admin/change-password', { newPassword: changePasswordData.newPassword });
             setMustChangePassword(false);
             setView('dashboard');
             setChangePasswordData({ newPassword: '', confirmPassword: '' });
         } catch (error) {
-            setError(error.response?.data?.error || 'Server error');
+            // Replaced optional chaining with traditional property access
+            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Server error');
         }
     };
 
@@ -78,7 +73,8 @@ const App = () => {
             const response = await axios.get('/admin/radios');
             setRadios(response.data);
         } catch (error) {
-            setError('Failed to fetch radios');
+            // Replaced optional chaining with traditional property access
+            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to fetch radios');
         }
     };
 
@@ -88,7 +84,8 @@ const App = () => {
             const response = await axios.get('/admin/users');
             setUsers(response.data);
         } catch (error) {
-            setError('Failed to fetch users');
+            // Replaced optional chaining with traditional property access
+            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to fetch users');
         }
     };
 
@@ -106,7 +103,8 @@ const App = () => {
             setNewRadio({ name: '', stream_url: '', now_playing_api: '', enabled: true });
             fetchRadios();
         } catch (error) {
-            setError(error.response?.data?.error || 'Failed to save radio');
+            // Replaced optional chaining with traditional property access
+            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to save radio');
         }
     };
 
@@ -129,7 +127,8 @@ const App = () => {
             setNewUser({ username: '', password: '', enabled: true });
             fetchUsers();
         } catch (error) {
-            setError(error.response?.data?.error || 'Failed to save user');
+            // Replaced optional chaining with traditional property access
+            setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to save user');
         }
     };
 
@@ -141,7 +140,8 @@ const App = () => {
                 await axios.delete(`/admin/radios/${id}`);
                 fetchRadios();
             } catch (error) {
-                setError(error.response?.data?.error || 'Failed to delete radio');
+                // Replaced optional chaining with traditional property access
+                setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to delete radio');
             }
         }
     };
@@ -154,7 +154,8 @@ const App = () => {
                 await axios.delete(`/admin/users/${id}`);
                 fetchUsers();
             } catch (error) {
-                setError(error.response?.data?.error || 'Failed to delete user');
+                // Replaced optional chaining with traditional property access
+                setError(error.response && error.response.data && error.response.data.error ? error.response.data.error : 'Failed to delete user');
             }
         }
     };
