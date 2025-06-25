@@ -363,7 +363,7 @@ app.get('/radio/:username', async (req, res) => {
 
         res.json(radios.map(radio => ({
             name: radio.name,
-            url: radio.stream_url,
+            url: radio.url,
             song: "Coming SOON!",
             owner: radio.is_global ? 'Global' : (radio.user_id ? radio.User?.username : 'Unknown')
         })));
