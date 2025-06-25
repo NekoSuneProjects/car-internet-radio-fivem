@@ -11,7 +11,10 @@ const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 3415;
+
+// Enable trust proxy to handle X-Forwarded-For header
+app.set('trust proxy', 1);
 
 // Ensure .env file exists and generate JWT_SECRET if not set
 const envFilePath = path.join(__dirname, '.env');
@@ -52,7 +55,7 @@ const User = sequelize.define('User', {
     },
     must_change_password: {
         type: DataTypes.BOOLEAN,
-        defaultValue: false
+        defaultValue: true
     },
     enabled: {
         type: DataTypes.BOOLEAN,
@@ -104,6 +107,11 @@ const RadioStation = sequelize.define('RadioStation', {
             model: User,
             key: 'id'
         }
+    },
+    is_global: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false
     }
 }, {
     tableName: 'radio_stations',
@@ -165,7 +173,15 @@ app.use(helmet({
 }));
 app.use(cors({ origin: `http://localhost:${port}`, credentials: true }));
 app.use(express.json());
-app.use('/admin', express.static(path.join(__dirname, 'admin')));
+
+// Serve admin panel files, except index.html
+app.use('/admin', express.static(path.join(__dirname, 'admin'), {
+    setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.js')) {
+            res.set('Cache-Control', 'no-store');
+        }
+    }
+}));
 
 // Serve favicon
 app.get('/favicon.ico', (req, res) => {
@@ -175,6 +191,25 @@ app.get('/favicon.ico', (req, res) => {
     } else {
         res.status(204).end();
     }
+});
+
+// Serve admin index.html with dynamic timestamp
+app.get('/admin', (req, res) => {
+    const indexPath = path.join(__dirname, 'admin', 'index.html');
+    const timestamp = Math.floor(Date.now() / 1000);
+    fs.readFile(indexPath, 'utf8', (err, data) => {
+        if (err) {
+            console.error('Error reading index.html:', err);
+            return res.status(500).send('Internal server error');
+        }
+        const updatedHtml = data.replace(
+            '<script type="text/babel" src="script.js?v1"></script>',
+            `<script type="text/babel" src="script.js?v=${timestamp}"></script>`
+        );
+        res.set('Content-Type', 'text/html');
+        res.set('Cache-Control', 'no-store');
+        res.send(updatedHtml);
+    });
 });
 
 // Rate limiter for login attempts
@@ -273,22 +308,34 @@ app.patch('/admin/settings', authenticateJWT, async (req, res) => {
     }
 });
 
+// Get user settings
+app.get('/admin/settings', authenticateJWT, async (req, res) => {
+    try {
+        const user = await User.findByPk(req.user.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        res.json({ global_radios_enabled: user.global_radios_enabled });
+    } catch (error) {
+        console.error('Error fetching settings:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Get all radio stations (global + user-specific if authenticated)
 app.get('/radios', authenticateJWT, async (req, res) => {
     try {
         const whereClause = req.user.global_radios_enabled
             ? { enabled: true }
-            : { enabled: true, user_id: req.user.id };
+            : { enabled: true, user_id: req.user.id, is_global: false };
         const radios = await RadioStation.findAll({
             where: whereClause,
-            attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api'], 'user_id'],
+            attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api'], 'user_id', 'is_global'],
             include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
         res.json(radios.map(radio => ({
             name: radio.name,
             url: radio.url,
             api: radio.api,
-            owner: radio.user_id ? radio.User?.username : 'Global'
+            owner: radio.is_global ? 'Global' : (radio.user_id ? radio.User?.username : 'Unknown')
         })));
     } catch (error) {
         console.error('Error fetching radio stations:', error);
@@ -304,17 +351,17 @@ app.get('/radio/:username', async (req, res) => {
         if (!user) return res.status(404).json({ error: 'User not found or disabled' });
         const whereClause = user.global_radios_enabled
             ? { enabled: true }
-            : { enabled: true, user_id: user.id };
+            : { enabled: true, user_id: user.id, is_global: false };
         const radios = await RadioStation.findAll({
             where: whereClause,
-            attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api'], 'user_id'],
+            attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api'], 'user_id', 'is_global'],
             include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
         res.json(radios.map(radio => ({
             name: radio.name,
             url: radio.url,
             api: radio.api,
-            owner: radio.user_id ? radio.User?.username : 'Global'
+            owner: radio.is_global ? 'Global' : (radio.user_id ? radio.User?.username : 'Unknown')
         })));
     } catch (error) {
         console.error('Error fetching user radio stations:', error);
@@ -356,10 +403,10 @@ app.get('/admin/radios', authenticateJWT, async (req, res) => {
     try {
         const whereClause = req.user.role === 'admin'
             ? {}
-            : { user_id: req.user.id };
+            : { user_id: req.user.id, is_global: false };
         const radios = await RadioStation.findAll({
             where: whereClause,
-            attributes: ['id', 'name', 'stream_url', 'now_playing_api', 'enabled', 'user_id'],
+            attributes: ['id', 'name', 'stream_url', 'now_playing_api', 'enabled', 'user_id', 'is_global'],
             include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
         res.json(radios.map(radio => ({
@@ -368,7 +415,8 @@ app.get('/admin/radios', authenticateJWT, async (req, res) => {
             stream_url: radio.stream_url,
             now_playing_api: radio.now_playing_api,
             enabled: radio.enabled,
-            owner: radio.user_id ? radio.User?.username : 'Global'
+            owner: radio.is_global ? 'Global' : (radio.user_id ? radio.User?.username : 'Unknown'),
+            is_global: radio.is_global
         })));
     } catch (error) {
         console.error('Error fetching admin radio stations:', error);
@@ -378,15 +426,16 @@ app.get('/admin/radios', authenticateJWT, async (req, res) => {
 
 // Admin: Add radio station
 app.post('/admin/radios', authenticateJWT, async (req, res) => {
-    const { name, stream_url, now_playing_api, enabled } = req.body;
+    const { name, stream_url, now_playing_api, enabled, is_global } = req.body;
     try {
         const radioData = {
             name,
             stream_url,
             now_playing_api: now_playing_api || null,
-            enabled: enabled !== undefined ? enabled : true
+            enabled: enabled !== undefined ? enabled : true,
+            is_global: req.user.role === 'admin' ? is_global : false
         };
-        if (req.user.role === 'user') {
+        if (!radioData.is_global) {
             radioData.user_id = req.user.id;
         }
         const radio = await RadioStation.create(radioData);
@@ -400,21 +449,26 @@ app.post('/admin/radios', authenticateJWT, async (req, res) => {
 // Admin: Update radio station
 app.put('/admin/radios/:id', authenticateJWT, async (req, res) => {
     const { id } = req.params;
-    const { name, stream_url, now_playing_api, enabled } = req.body;
+    const { name, stream_url, now_playing_api, enabled, is_global } = req.body;
     try {
         const radio = await RadioStation.findByPk(id);
         if (!radio) {
             return res.status(404).json({ error: 'Radio not found' });
         }
-        if (req.user.role === 'user' && radio.user_id !== req.user.id) {
+        if (req.user.role === 'user' && (radio.user_id !== req.user.id || radio.is_global)) {
             return res.status(403).json({ error: 'Unauthorized to edit this radio' });
         }
-        await radio.update({
+        const radioData = {
             name,
             stream_url,
             now_playing_api: now_playing_api || null,
             enabled
-        });
+        };
+        if (req.user.role === 'admin') {
+            radioData.is_global = is_global;
+            radioData.user_id = is_global ? null : radio.user_id || req.user.id;
+        }
+        await radio.update(radioData);
         res.json(radio);
     } catch (error) {
         console.error('Error updating radio station:', error);
@@ -430,7 +484,7 @@ app.delete('/admin/radios/:id', authenticateJWT, async (req, res) => {
         if (!radio) {
             return res.status(404).json({ error: 'Radio not found' });
         }
-        if (req.user.role === 'user' && radio.user_id !== req.user.id) {
+        if (req.user.role === 'user' && (radio.user_id !== req.user.id || radio.is_global)) {
             return res.status(403).json({ error: 'Unauthorized to delete this radio' });
         }
         await radio.destroy();

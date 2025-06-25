@@ -9,7 +9,7 @@ const App = () => {
     const [changePasswordData, setChangePasswordData] = useState({ newPassword: '', confirmPassword: '' });
     const [view, setView] = useState(token ? 'dashboard' : 'login');
     const [radios, setRadios] = useState([]);
-    const [newRadio, setNewRadio] = useState({ name: '', stream_url: '', now_playing_api: '', enabled: true });
+    const [newRadio, setNewRadio] = useState({ name: '', stream_url: '', now_playing_api: '', enabled: true, is_global: false });
     const [editingRadioId, setEditingRadioId] = useState(null);
     const [users, setUsers] = useState([]);
     const [newUser, setNewUser] = useState({ username: '', password: '', enabled: true, role: 'user' });
@@ -28,13 +28,10 @@ const App = () => {
 
     // Check token validity and fetch initial data
     useEffect(() => {
-        if (token && view === 'login') {
+        if (token) {
             axios.get('/admin/radios').then(response => {
                 setView('dashboard');
                 setRadios(response.data);
-                if (role === 'admin') {
-                    fetchUsers();
-                }
                 // Decode token to get role and userId
                 const decoded = JSON.parse(atob(token.split('.')[1]));
                 setRole(decoded.role);
@@ -46,13 +43,23 @@ const App = () => {
                 }).catch(() => {
                     setError('Failed to fetch settings');
                 });
+                if (decoded.role === 'admin') {
+                    fetchUsers();
+                }
             }).catch(() => {
                 localStorage.removeItem('token');
                 setToken(null);
                 setView('login');
             });
         }
-    }, [token, role]);
+    }, [token]);
+
+    // Fetch radios on dashboard view
+    useEffect(() => {
+        if (view === 'dashboard') {
+            fetchRadios();
+        }
+    }, [view, settings]);
 
     // Handle login
     const handleLogin = async (e) => {
@@ -67,7 +74,6 @@ const App = () => {
             setMustChangePassword(response.data.mustChangePassword);
             setView(response.data.mustChangePassword ? 'changePassword' : 'dashboard');
             setLoginData({ username: '', password: '' });
-            fetchRadios();
             if (response.data.role === 'admin') {
                 fetchUsers();
             }
@@ -95,6 +101,7 @@ const App = () => {
             setMustChangePassword(false);
             setView('dashboard');
             setChangePasswordData({ newPassword: '', confirmPassword: '' });
+            fetchRadios();
         } catch (error) {
             setError(error.response && error.response.data && error.response.data.error
                 ? error.response.data.error : 'Server error');
@@ -134,7 +141,7 @@ const App = () => {
             } else {
                 await axios.post('/admin/radios', newRadio);
             }
-            setNewRadio({ name: '', stream_url: '', now_playing_api: '', enabled: true });
+            setNewRadio({ name: '', stream_url: '', now_playing_api: '', enabled: true, is_global: false });
             fetchRadios();
         } catch (error) {
             setError(error.response && error.response.data && error.response.data.error
@@ -177,6 +184,7 @@ const App = () => {
         try {
             await axios.patch('/admin/settings', settings);
             setError('Settings updated successfully');
+            fetchRadios();
         } catch (error) {
             setError(error.response && error.response.data && error.response.data.error
                 ? error.response.data.error : 'Failed to update settings');
@@ -217,7 +225,8 @@ const App = () => {
             name: radio.name,
             stream_url: radio.stream_url,
             now_playing_api: radio.now_playing_api || '',
-            enabled: radio.enabled
+            enabled: radio.enabled,
+            is_global: radio.is_global
         });
         setEditingRadioId(radio.id);
     };
@@ -395,6 +404,18 @@ const App = () => {
                                 />
                                 <span>Enabled</span>
                             </label>
+                            {role === 'admin' && (
+                                <label className="flex items-center">
+                                    <input
+                                        name="is_global"
+                                        type="checkbox"
+                                        checked={newRadio.is_global}
+                                        onChange={handleRadioChange}
+                                        className="mr-2"
+                                    />
+                                    <span>Global Radio</span>
+                                </label>
+                            )}
                             <button
                                 type="submit"
                                 className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all col-span-1 sm:col-span-2"
@@ -454,7 +475,7 @@ const App = () => {
                         </div>
                     )}
                     <div className="mb-8 bg-gray-800 p-6 rounded-lg shadow-lg">
-                        <h2 className="text-xl font-semibold mb-4">Settings</h2>
+                        <h2 className="text-xl font-semibold mb-3">Settings</h2>
                         <form onSubmit={handleSettingsSubmit} className="space-y-4">
                             <label className="flex items-center">
                                 <input
@@ -468,7 +489,7 @@ const App = () => {
                             </label>
                             <button
                                 type="submit"
-                                className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition-all"
+                                className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
                             >
                                 Save Settings
                             </button>
@@ -476,26 +497,27 @@ const App = () => {
                     </div>
                     <div className="mb-8">
                         <h2 className="text-xl font-semibold mb-4">Radio Stations</h2>
-                        <div className="grid gap-4">
+                        <div class="grid gap-4">
                             {radios.map(radio => (
-                                <div key={radio.id} className="bg-gray-800 p-4 rounded-lg shadow-lg flex flex-col sm:flex-row justify-between items-center">
+                                <div key={radio.id} className="bg-gray-800 p-4 shadow-lg rounded-lg flex justify-between items-center">
                                     <div>
                                         <h3 className="text-lg font-semibold">{radio.name}</h3>
-                                        <p className="text-sm">Stream: {radio.stream_url}</p>
-                                        <p className="text-sm">API: {radio.now_playing_api || 'None'}</p>
-                                        <p className="text-sm">Status: {radio.enabled ? 'Enabled' : 'Disabled'}</p>
-                                        <p className="text-sm">Owner: {radio.owner}</p>
+                                        <p className="text-sm">Stream URL: {radio.stream_url}</p>
+                                        <p className="text-sm">API:: {radio.now_playing_api || 'None'}</p>
+                                        <p className="text-sm">Status:: {radio.enabled ? 'Enabled' : 'Disabled'}</p>
+                                        <p className="text-sm">Owner:: {radio.owner}</p>
+                                        <p className="text-sm">Type:: {radio.is_global ? 'Global' : 'Local'}</p>
                                     </div>
-                                    <div className="flex space-x-2 mt-2 sm:mt-0">
+                                    <div className="flex space-x-2">
                                         <button
                                             onClick={() => handleRadioEdit(radio)}
-                                            className="bg-yellow-600 hover:bg-yellow-700 text-white p-2 rounded transition-all"
+                                            className="bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded transition-all"
                                         >
                                             <i className="fas fa-edit"></i>
                                         </button>
                                         <button
                                             onClick={() => handleRadioDelete(radio.id)}
-                                            className="bg-red-600 hover:bg-red-700 text-white p-2 rounded transition-all"
+                                            className="bg-red-500 hover:bg-red-600 text-white px-2 py-2 rounded transition-all"
                                         >
                                             <i className="fas fa-trash"></i>
                                         </button>
@@ -509,7 +531,7 @@ const App = () => {
                             <h2 className="text-xl font-semibold mb-4">Users</h2>
                             <div className="grid gap-4">
                                 {users.map(user => (
-                                    <div key={user.id} className="bg-gray-800 p-4 rounded-lg shadow-lg flex flex-col sm:flex-row justify-between items-center">
+                                    <div key={user.id} className="bg-gray-800 p-4 rounded-lg shadow-lg flex justify-between items-center">
                                         <div>
                                             <h3 className="text-lg font-semibold">{user.username}</h3>
                                             <p className="text-sm">Status: {user.enabled ? 'Enabled' : 'Disabled'}</p>
@@ -517,7 +539,7 @@ const App = () => {
                                             <p className="text-sm">Role: {user.role}</p>
                                             <p className="text-sm">Global Radios: {user.global_radios_enabled ? 'Enabled' : 'Disabled'}</p>
                                         </div>
-                                        <div className="flex space-x-2 mt-2 sm:mt-0">
+                                        <div className="flex space-x-2">
                                             <button
                                                 onClick={() => handleUserEdit(user)}
                                                 className="bg-yellow-600 hover:bg-yellow-700 text-white p-2 rounded transition-all"
