@@ -5,11 +5,11 @@ const { Sequelize, DataTypes } = require('sequelize');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
-const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -118,11 +118,41 @@ async function initializeDatabase() {
     }
 }
 
-// Security middleware
-app.use(helmet()); // Add security headers
-app.use(cors({ origin: 'http://localhost:3000', credentials: true }));
+// Security middleware with custom CSP
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            styleSrc: ["'self'", "'unsafe-inline'", 'https://cdn.jsdelivr.net'],
+            scriptSrc: [
+                "'self'",
+                "'unsafe-inline'", // Required for React and Babel in this setup
+                'https://cdn.jsdelivr.net/npm/react@17.0.2',
+                'https://cdn.jsdelivr.net/npm/react-dom@17.0.2',
+                'https://cdn.jsdelivr.net/npm/axios@1.4.0',
+                'https://cdn.jsdelivr.net/npm/babel-standalone@6.26.0'
+            ],
+            imgSrc: ["'self'", 'data:'],
+            connectSrc: ["'self'", `http://localhost:${port}`, 'https://cdn.jsdelivr.net'],
+            fontSrc: ["'self'", 'https://cdn.jsdelivr.net'],
+            objectSrc: ["'none'"],
+            upgradeInsecureRequests: []
+        }
+    }
+}));
+app.use(cors({ origin: `http://localhost:${port}`, credentials: true }));
 app.use(express.json());
 app.use('/admin', express.static(path.join(__dirname, 'admin')));
+
+// Serve favicon (optional: add favicon.ico to backend/ or return 204)
+app.get('/favicon.ico', (req, res) => {
+    const faviconPath = path.join(__dirname, 'favicon.ico');
+    if (fs.existsSync(faviconPath)) {
+        res.sendFile(faviconPath);
+    } else {
+        res.status(204).end(); // No content
+    }
+});
 
 // Rate limiter for login attempts
 const loginLimiter = rateLimit({
