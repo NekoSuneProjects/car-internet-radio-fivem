@@ -328,13 +328,13 @@ app.get('/radios', authenticateJWT, async (req, res) => {
             : { enabled: true, user_id: req.user.id, is_global: false };
         const radios = await RadioStation.findAll({
             where: whereClause,
-            attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api'], 'user_id', 'is_global'],
+            attributes: ['id', 'name', 'stream_url', 'now_playing_api', 'enabled', 'user_id', 'is_global'],
             include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
         res.json(radios.map(radio => ({
             name: radio.name,
-            url: radio.url,
-            api: radio.api,
+            url: radio.stream_url,
+            song: "Coming SOON!",
             owner: radio.is_global ? 'Global' : (radio.user_id ? radio.User?.username : 'Unknown')
         })));
     } catch (error) {
@@ -354,13 +354,13 @@ app.get('/radio/:username', async (req, res) => {
             : { enabled: true, user_id: user.id, is_global: false };
         const radios = await RadioStation.findAll({
             where: whereClause,
-            attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api'], 'user_id', 'is_global'],
+            attributes: ['id', 'name', 'stream_url', 'now_playing_api', 'enabled', 'user_id', 'is_global'],
             include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
 
         res.json(radios.map(radio => ({
             name: radio.name,
-            url: radio.url,
+            url: radio.stream_url,
             song: "Coming SOON!",
             owner: radio.is_global ? 'Global' : (radio.user_id ? radio.User?.username : 'Unknown')
         })));
