@@ -357,6 +357,10 @@ app.get('/radio/:username', async (req, res) => {
             attributes: ['name', ['stream_url', 'url'], ['now_playing_api', 'api'], 'user_id', 'is_global'],
             include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
+
+        //DEBUG TEST
+        console.log(radios)
+
         res.json(radios.map(radio => ({
             name: radio.name,
             url: radio.stream_url,
