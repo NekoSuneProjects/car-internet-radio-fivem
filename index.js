@@ -358,9 +358,6 @@ app.get('/radio/:username', async (req, res) => {
             include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
 
-        //DEBUG TEST
-        console.log(radios)
-
         res.json(radios.map(radio => ({
             name: radio.name,
             url: radio.url,
