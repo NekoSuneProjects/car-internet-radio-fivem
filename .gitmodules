@@ -2,3 +2,7 @@
 	path = backend
 	url = https://github.com/NekoSuneProjects/car-internet-radio-fivem
 	branch = backend
+[submodule "fivem_resource"]
+	path = fivem_resource
+	url = https://github.com/NekoSuneProjects/car-internet-radio-fivem
+	branch = fivemscript
