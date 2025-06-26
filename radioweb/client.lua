@@ -5,6 +5,7 @@ local currentSong = nil
 local uiVisible = false
 local currentVehicle = nil
 local radioStations = {}
+local activeRadios = {} -- Track active radio instances
 
 -- Check if vehicle is blacklisted
 local function IsVehicleBlacklisted(vehicle)
@@ -18,8 +19,18 @@ local function IsVehicleBlacklisted(vehicle)
     return false
 end
 
+-- Hide UI
+local function HideUI()
+    SendNUIMessage({ type = 'hide' })
+    uiVisible = false
+    SetNuiFocus(false, false) -- Disable mouse cursor and focus
+end
+
 -- Show UI
 local function ShowUI()
+    if not radioStations or #radioStations == 0 then
+        return
+    end
     SendNUIMessage({
         type = 'show',
         radios = radioStations,
@@ -28,13 +39,11 @@ local function ShowUI()
     })
     uiVisible = true
     SetNuiFocus(true, true) -- Enable mouse cursor and focus
-end
-
--- Hide UI
-local function HideUI()
-    SendNUIMessage({ type = 'hide' })
-    uiVisible = false
-    SetNuiFocus(false, false) -- Disable mouse cursor and focus
+    SetTimeout(Config.UIFadeTime, function()
+        if uiVisible then
+            HideUI()
+        end
+    end)
 end
 
 -- Fetch radio stations (try /radio/username, /radio, /radios)
@@ -47,7 +56,6 @@ local function FetchRadioStations()
         }
         local function tryEndpoint(index)
             if not endpoints[index] then
-                print('Failed to fetch radio stations: No valid endpoints')
                 TriggerServerEvent('radioweb:fetchRadios')
                 return
             end
@@ -62,9 +70,10 @@ local function FetchRadioStations()
                                 ShowUI()
                             end
                         end
+                    else
+                        print('FetchRadioStations: Invalid JSON response')
                     end
                 else
-                    print('Failed to fetch radio stations (client, endpoint ' .. endpoints[index] .. '): HTTP ' .. status)
                     tryEndpoint(index + 1)
                 end
             end, 'GET', '', { ['Content-Type'] = 'application/json', ['Authorization'] = 'Bearer ' .. GetConvar('RADIO_API_TOKEN', '') })
@@ -90,6 +99,8 @@ AddEventHandler('radioweb:receiveRadios', function(data, error)
                 ShowUI()
             end
         end
+    else
+        print('receiveRadios: No data received from server')
     end
 end)
 
@@ -99,35 +110,94 @@ local function PlayRadio(index, vehicleNetId)
     if radio then
         currentRadio = index
         currentSong = radio.song or 'Unknown'
-        xsound:PlayUrlPos('car_radio_' .. vehicleNetId, radio.url, 0.5, GetEntityCoords(GetVehiclePedIsIn(PlayerPedId(), false)), false)
-        xsound:Distance('car_radio_' .. vehicleNetId, 10.0)
-        ShowUI()
+        local vehicle = NetworkGetEntityFromNetworkId(vehicleNetId)
+        if not DoesEntityExist(vehicle) then
+            return
+        end
+        local playerPed = PlayerPedId()
+        local coords = GetEntityCoords(vehicle)
+        local volume = IsPedInVehicle(playerPed, vehicle, false) and 0.5 or 0.1 -- Louder inside, faint outside
+        local soundName = 'car_radio_' .. vehicleNetId
+        xsound:PlayUrlPos(soundName, radio.url, volume, coords, true) -- Dynamic position
+        xsound:setSoundDynamic(soundName, true) -- ADD THIS
+        xsound:Distance(soundName, 20.0) -- Range for external audibility
+        -- Wait for audio to start playing
+        local startTime = GetGameTimer()
+        local timeout = 5000 -- 5 seconds timeout
+        while true do
+            Citizen.Wait(100)
+            local info = xsound:getInfo(soundName)
+            if info and info.playing then
+                break
+            end
+            if GetGameTimer() - startTime > timeout then
+                return
+            end
+        end
+        activeRadios[vehicleNetId] = true -- Track active radio
+        if IsPedInVehicle(playerPed, vehicle, false) then
+            ShowUI()
+        end
+    else
+        print('PlayRadio: Invalid radio index or no radio data')
     end
 end
 
 -- Stop radio
 local function StopRadio(vehicleNetId)
     if currentRadio then
-        xsound:Destroy('car_radio_' .. vehicleNetId)
+        local soundName = 'car_radio_' .. vehicleNetId
+        xsound:Destroy(soundName)
+        activeRadios[vehicleNetId] = nil -- Remove from active radios
         currentRadio = nil
         currentSong = nil
-        SendNUIMessage({ type = 'hide' })
-        uiVisible = false
+        if uiVisible then
+            HideUI()
+        end
     end
+end
+
+-- Helper function to count table entries
+local function tableLength(tbl)
+    local count = 0
+    for _ in pairs(tbl) do count = count + 1 end
+    return count
 end
 
 -- Sync radio state
 RegisterNetEvent('radioweb:syncRadio')
 AddEventHandler('radioweb:syncRadio', function(vehicleNetId, radioIndex)
     local vehicle = NetworkGetEntityFromNetworkId(vehicleNetId)
-    if DoesEntityExist(vehicle) and GetVehiclePedIsIn(PlayerPedId(), false) == vehicle then
+    if DoesEntityExist(vehicle) then
+        local playerPed = PlayerPedId()
         if radioIndex == 0 then
             StopRadio(vehicleNetId)
         else
             PlayRadio(radioIndex, vehicleNetId)
         end
+        -- Update volume for nearby players
+        if not IsPedInVehicle(playerPed, vehicle, false) then
+            xsound:SetVolume('car_radio_' .. vehicleNetId, 0.1)
+        end
+    else
+        print('SyncRadio: Vehicle does not exist for netId', vehicleNetId)
     end
 end)
+
+-- Register /radio command
+RegisterCommand('radio', function(source, args, rawCommand)
+    local playerPed = PlayerPedId()
+    local vehicle = GetVehiclePedIsIn(playerPed, false)
+    if vehicle ~= 0 and not IsVehicleBlacklisted(vehicle) then
+        if not uiVisible then
+            ShowUI()
+        else
+            HideUI()
+        end
+    else
+        print('Radio command: Not in a valid vehicle')
+    end
+end, false)
 
 -- Main thread
 Citizen.CreateThread(function()
@@ -141,10 +211,12 @@ Citizen.CreateThread(function()
             if not isInVehicle and not IsVehicleBlacklisted(vehicle) then
                 isInVehicle = true
                 currentVehicle = vehicle
+                SetVehRadioStation(vehicle, "OFF") -- Disable in-game radio
                 SendNUIMessage({ type = 'enable' })
+                StopRadio(NetworkGetNetworkIdFromEntity(currentVehicle)) -- Ensure custom radio is off by default
             end
             
-            if isInVehicle and IsControlJustPressed(0, Config.UIKey) then
+            if isInVehicle and Config.EnableUIKey and IsControlJustPressed(0, Config.UIKey) then
                 if not uiVisible then
                     ShowUI()
                 else
@@ -164,12 +236,58 @@ Citizen.CreateThread(function()
     end
 end)
 
+-- Only update radio position for the local player’s vehicle
+Citizen.CreateThread(function()
+    while true do
+        Citizen.Wait(200) -- Every 30 seconds
+        local playerPed = PlayerPedId()
+        local vehicle = GetVehiclePedIsIn(playerPed, false)
+
+        if vehicle ~= 0 and DoesEntityExist(vehicle) then
+            local vehicleNetId = NetworkGetNetworkIdFromEntity(vehicle)
+            if activeRadios[vehicleNetId] then
+                local soundName = 'car_radio_' .. vehicleNetId
+                local coords = GetEntityCoords(PlayerPedId(), false)
+                local info = xsound:getInfo(soundName)
+
+                if info and info.playing then
+                    xsound:Position(soundName, coords)
+                else
+                    if currentRadio and radioStations[currentRadio] then
+                        local volume = 0.5
+                        xsound:PlayUrlPos(soundName, radioStations[currentRadio].url, volume, coords, true)
+                        xsound:Distance(soundName, 20.0)
+
+                        local startTime = GetGameTimer()
+                        while true do
+                            Citizen.Wait(100)
+                            local newInfo = xsound:getInfo(soundName)
+                            if newInfo and newInfo.playing then
+                                break
+                            end
+                            if GetGameTimer() - startTime > 5000 then
+                                activeRadios[vehicleNetId] = nil
+                                break
+                            end
+                        end
+                    else
+                        activeRadios[vehicleNetId] = nil
+                    end
+                end
+            end
+        end
+    end
+end)
+
+
 -- NUI callback for radio selection
 RegisterNUICallback('selectRadio', function(data, cb)
     local index = tonumber(data.index)
     if isInVehicle and currentVehicle then
         local vehicleNetId = NetworkGetNetworkIdFromEntity(currentVehicle)
         TriggerServerEvent('radioweb:selectRadio', vehicleNetId, index)
+    else
+        print('selectRadio: Not in vehicle or no current vehicle')
     end
     cb('ok')
 end)

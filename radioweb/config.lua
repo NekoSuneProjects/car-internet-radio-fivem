@@ -19,3 +19,6 @@ Config.BlacklistedVehicles = {
 -- UI settings
 Config.UIFadeTime = 5000 -- Time in ms before UI fades out
 Config.UIKey = 38 -- Key to open radio (default: E)
+
+-- Enable/disable E key for UI toggle (true = E key works, false = only /radio command)
+Config.EnableUIKey = true
