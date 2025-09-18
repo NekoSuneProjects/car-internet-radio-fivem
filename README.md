@@ -134,3 +134,5 @@ Contributions are welcome! Please submit a pull request or open an issue on GitH
 
 ## License
 This project is licensed under the MIT License.
+
+<!-- GitAds-Verify: UZT9PUSPNUU1YSAZI29YNZYMCG2HC7DO -->
