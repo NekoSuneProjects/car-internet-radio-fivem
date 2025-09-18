@@ -136,3 +136,7 @@ Contributions are welcome! Please submit a pull request or open an issue on GitH
 This project is licensed under the MIT License.
 
 <!-- GitAds-Verify: UZT9PUSPNUU1YSAZI29YNZYMCG2HC7DO -->
+
+## GitAds Sponsored
+[![Sponsored by GitAds](https://gitads.dev/v1/ad-serve?source=nekosuneprojects/car-internet-radio-fivem@github)](https://gitads.dev/v1/ad-track?source=nekosuneprojects/car-internet-radio-fivem@github)
+
