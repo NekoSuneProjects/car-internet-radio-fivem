@@ -10,6 +10,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
+const fetch = require('node-fetch');
 const app = express();
 const port = process.env.PORT || 3415;
 
@@ -320,21 +321,77 @@ app.get('/admin/settings', authenticateJWT, async (req, res) => {
     }
 });
 
+// Utility to fetch and parse now playing info
+async function getNowPlayingInfo(apiUrl) {
+    if (!apiUrl) return { song: 'Unavailable', dj: 'Unknown' };
+
+    try {
+        const res = await fetch(apiUrl, { timeout: 5000 });
+        const contentType = res.headers.get('content-type') || '';
+        const text = await res.text();
+
+        // --- AzuraCast API Detection ---
+        if (apiUrl.includes('/api/nowplaying/')) {
+            const json = JSON.parse(text);
+            const live = json.live || {};
+            const now = json.now_playing || {};
+            const song = now.song || {};
+
+            const artist = song.artist || 'Unknown Artist';
+            const title = song.title || 'Unknown Title';
+            const dj = live.is_live && live.streamer_name
+                ? live.streamer_name
+                : 'AutoDJ';
+
+            return {
+                song: `${artist} - ${title}`,
+                dj,
+                art: song.art || null
+            };
+        }
+
+        // --- Try generic JSON ---
+        if (contentType.includes('application/json')) {
+            const json = JSON.parse(text);
+            const artist = json.artist || json.now_playing?.artist || 'Unknown Artist';
+            const title = json.title || json.now_playing?.title || 'Unknown Title';
+            const dj = json.dj || json.streamer || 'AutoDJ';
+            return { song: `${artist} - ${title}`, dj };
+        }
+
+        // --- Fallback: Plain text (like Icecast-style) ---
+        if (typeof text === 'string' && text.trim().length > 0) {
+            return { song: text.trim(), dj: 'AutoDJ' };
+        }
+
+        return { song: 'Unavailable', dj: 'Unknown' };
+    } catch (err) {
+        console.warn(`Failed to fetch now playing for ${apiUrl}:`, err.message);
+        return { song: 'Unavailable', dj: 'Unknown' };
+    }
+}
+
 // Get all radio stations (global + user-specific if authenticated)
 app.get('/radio', async (req, res) => {
     try {
-        const whereClause = { enabled: true, is_global: true }
         const radios = await RadioStation.findAll({
-            where: whereClause,
+            where: { enabled: true, is_global: true },
             attributes: ['id', 'name', 'stream_url', 'now_playing_api', 'enabled', 'user_id', 'is_global'],
             include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
-        res.json(radios.map(radio => ({
-            name: radio.name,
-            url: radio.stream_url,
-            song: "Coming SOON!",
-            owner: 'Global'
-        })));
+
+        // Fetch now-playing info for all radios in parallel
+        const result = await Promise.all(radios.map(async (radio) => {
+            const nowPlaying = await getNowPlayingInfo(radio.now_playing_api);
+            return {
+                name: radio.name,
+                url: radio.stream_url,
+                song: `${nowPlaying.song} - ${nowPlaying.dj}`,
+                owner: 'Global'
+            };
+        }));
+        
+        res.json(result);
     } catch (error) {
         console.error('Error fetching radio stations:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -347,21 +404,28 @@ app.get('/radio/:username', async (req, res) => {
     try {
         const user = await User.findOne({ where: { username, enabled: true } });
         if (!user) return res.status(404).json({ error: 'User not found or disabled' });
+        
         const whereClause = user.global_radios_enabled
             ? { enabled: true }
             : { enabled: true, user_id: user.id, is_global: false };
+
         const radios = await RadioStation.findAll({
             where: whereClause,
             attributes: ['id', 'name', 'stream_url', 'now_playing_api', 'enabled', 'user_id', 'is_global'],
             include: [{ model: User, attributes: ['username'], as: 'User' }]
         });
 
-        res.json(radios.map(radio => ({
-            name: radio.name,
-            url: radio.stream_url,
-            song: "Coming SOON!",
-            owner: radio.is_global ? 'Global' : (radio.user_id ? radio.User?.username : 'Unknown')
-        })));
+        const result = await Promise.all(radios.map(async (radio) => {
+            const nowPlaying = await getNowPlayingInfo(radio.now_playing_api);
+            return {
+                name: radio.name,
+                url: radio.stream_url,
+                song: `${nowPlaying.song} - ${nowPlaying.dj}`,
+                owner: radio.is_global ? 'Global' : (radio.user_id ? radio.User?.username : 'Unknown')
+            };
+        }));
+
+        res.json(result);
     } catch (error) {
         console.error('Error fetching user radio stations:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -371,25 +435,25 @@ app.get('/radio/:username', async (req, res) => {
 // Get song data for a specific radio URL
 app.get('/radionp', async (req, res) => {
     const url = req.query.url;
+    if (!url) {
+        return res.status(400).json({ error: 'Missing ?url parameter' });
+    }
+
     try {
         const radio = await RadioStation.findOne({
             where: { stream_url: url, enabled: true },
             attributes: ['name', ['now_playing_api', 'api']]
         });
+
         if (!radio) {
             return res.status(404).json({ error: 'Radio not found or disabled' });
         }
+
         if (radio.api) {
-            try {
-                const response = await axios.get(radio.api);
-                const song = response.data.song || 'Unknown Song';
-                res.json({ song });
-            } catch (apiError) {
-                console.error(`Error fetching now playing from ${radio.api}:`, apiError.message);
-                res.json({ song: `Now Playing on ${radio.name}` });
-            }
+            const nowPlaying = await getNowPlayingInfo(radio.api);
+            return res.json({song: `${nowPlaying.song} - ${nowPlaying.dj}`});
         } else {
-            res.json({ song: `Now Playing on ${radio.name}` });
+            return res.json({ song: `Now Playing on ${radio.name}` });
         }
     } catch (error) {
         console.error('Error fetching song data:', error);
