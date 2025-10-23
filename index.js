@@ -340,7 +340,7 @@ async function getNowPlayingInfo(apiUrl) {
             const artist = song.artist || 'Unknown Artist';
             const title = song.title || 'Unknown Title';
             const dj = live.is_live && live.streamer_name
-                ? live.streamer_name
+                ? `DJ ${live.streamer_name}`
                 : 'AutoDJ';
 
             return {
