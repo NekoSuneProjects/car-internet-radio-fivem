@@ -2,10 +2,57 @@ local xsound = exports.xsound
 local isInVehicle = false
 local currentRadio = nil
 local currentSong = nil
+local currentRadioType = nil -- 'global' or 'custom'
 local uiVisible = false
 local currentVehicle = nil
 local radioStations = {}
+local customStations = {}
 local activeRadios = {} -- Track active radio instances
+local nuiHasFocus = false -- Track if we've intentionally grabbed focus
+local customSource = nil -- Track custom URL playback
+local playlistState = {} -- vehicleNetId -> { stationId, tracks, index }
+local durationCache = {}
+local urlCache = {}
+local pendingPlays = {}
+local userVolume = 1.0
+
+local function asNumber(val)
+    if type(val) == 'number' then
+        return val
+    end
+    return nil
+end
+
+local function isSoundcloudUrl(url)
+    if not url then return false end
+    return string.find(url, 'soundcloud.com', 1, true) or string.find(url, 'sndcdn.com', 1, true)
+end
+
+local function baseVolume(inVehicle)
+    return inVehicle and 0.5 or 0.1
+end
+
+local function getVolume(inVehicle)
+    return baseVolume(inVehicle) * userVolume
+end
+
+local function getStationName(stationId)
+    if not stationId then return 'Radio' end
+    for _, st in ipairs(customStations or {}) do
+        if st.id == stationId then
+            return st.name or st.title or 'Custom Station'
+        end
+    end
+    return 'Custom Station'
+end
+
+local function sendNowPlaying(title, station)
+    SendNUIMessage({
+        type = 'nowPlaying',
+        title = title or 'Unknown',
+        station = station or 'Radio'
+    })
+end
 
 -- Check if vehicle is blacklisted
 local function IsVehicleBlacklisted(vehicle)
@@ -23,27 +70,30 @@ end
 local function HideUI()
     SendNUIMessage({ type = 'hide' })
     uiVisible = false
+    nuiHasFocus = false
     SetNuiFocus(false, false) -- Disable mouse cursor and focus
 end
 
 -- Show UI
-local function ShowUI()
-    if not radioStations or #radioStations == 0 then
-        return
+local function ShowUI(useFocus)
+    if useFocus == nil then
+        useFocus = false
     end
     SendNUIMessage({
         type = 'show',
         radios = radioStations,
-        currentRadio = currentRadio,
-        currentSong = currentSong or 'Unknown'
+        customRadios = customStations,
+        currentRadio = (currentRadioType == 'global' and currentRadio) and ('g:' .. tostring(currentRadio)) or (currentRadioType == 'custom' and currentRadio) or nil,
+        currentSong = currentSong or 'Unknown',
+        volume = math.floor(userVolume * 100)
     })
     uiVisible = true
-    SetNuiFocus(true, true) -- Enable mouse cursor and focus
-    SetTimeout(Config.UIFadeTime, function()
-        if uiVisible then
-            HideUI()
-        end
-    end)
+    if useFocus then
+        nuiHasFocus = true
+        SetNuiFocus(true, true) -- Enable mouse cursor and focus when explicitly requested
+    elseif not nuiHasFocus then
+        SetNuiFocus(false, false) -- Avoid stealing controls for passive popups
+    end
 end
 
 -- Fetch radio stations (try /radio/username, /radio, /radios)
@@ -64,11 +114,8 @@ local function FetchRadioStations()
                     local data = json.decode(response)
                     if data then
                         radioStations = data
-                        if currentRadio and radioStations[currentRadio] and radioStations[currentRadio].song ~= currentSong then
+                        if currentRadioType == 'global' and currentRadio and radioStations[currentRadio] and radioStations[currentRadio].song ~= currentSong then
                             currentSong = radioStations[currentRadio].song
-                            if isInVehicle then
-                                ShowUI()
-                            end
                         end
                     else
                         print('FetchRadioStations: Invalid JSON response')
@@ -93,14 +140,20 @@ AddEventHandler('radioweb:receiveRadios', function(data, error)
     end
     if data then
         radioStations = data
-        if currentRadio and radioStations[currentRadio] and radioStations[currentRadio].song ~= currentSong then
+        if currentRadioType == 'global' and currentRadio and radioStations[currentRadio] and radioStations[currentRadio].song ~= currentSong then
             currentSong = radioStations[currentRadio].song
-            if isInVehicle then
-                ShowUI()
-            end
         end
     else
         print('receiveRadios: No data received from server')
+    end
+end)
+
+-- Receive custom radios
+RegisterNetEvent('radioweb:receiveCustomRadios')
+AddEventHandler('radioweb:receiveCustomRadios', function(data)
+    customStations = data or {}
+    if uiVisible then
+        ShowUI(nuiHasFocus)
     end
 end)
 
@@ -109,14 +162,16 @@ local function PlayRadio(index, vehicleNetId)
     local radio = radioStations[index]
     if radio then
         currentRadio = index
+        currentRadioType = 'global'
         currentSong = radio.song or 'Unknown'
+        customSource = nil
         local vehicle = NetworkGetEntityFromNetworkId(vehicleNetId)
         if not DoesEntityExist(vehicle) then
             return
         end
         local playerPed = PlayerPedId()
         local coords = GetEntityCoords(vehicle)
-        local volume = IsPedInVehicle(playerPed, vehicle, false) and 0.5 or 0.1 -- Louder inside, faint outside
+        local volume = getVolume(IsPedInVehicle(playerPed, vehicle, false))
         local soundName = 'car_radio_' .. vehicleNetId
         xsound:PlayUrlPos(soundName, radio.url, volume, coords, true) -- Dynamic position
         xsound:setSoundDynamic(soundName, true) -- ADD THIS
@@ -135,9 +190,7 @@ local function PlayRadio(index, vehicleNetId)
             end
         end
         activeRadios[vehicleNetId] = true -- Track active radio
-        if IsPedInVehicle(playerPed, vehicle, false) then
-            ShowUI()
-        end
+        sendNowPlaying(currentSong, radio.name or 'Global Station')
     else
         print('PlayRadio: Invalid radio index or no radio data')
     end
@@ -145,16 +198,109 @@ end
 
 -- Stop radio
 local function StopRadio(vehicleNetId)
-    if currentRadio then
+    if currentRadio or customSource then
         local soundName = 'car_radio_' .. vehicleNetId
         xsound:Destroy(soundName)
         activeRadios[vehicleNetId] = nil -- Remove from active radios
         currentRadio = nil
         currentSong = nil
+        customSource = nil
+        currentRadioType = nil
+        SendNUIMessage({ type = 'hideNowPlaying' })
         if uiVisible then
             HideUI()
         end
     end
+end
+
+-- Play custom URL (YouTube/SoundCloud/direct)
+local function PlayCustomTrack(vehicleNetId, stationId, trackData, trackIndex, markState)
+    if not trackData or not trackData.url or trackData.url == '' then
+        return
+    end
+
+    local originalUrl = trackData.url
+    local resolvedUrl = trackData.resolvedUrl or urlCache[originalUrl] or originalUrl
+    if isSoundcloudUrl(originalUrl) and not trackData.resolvedUrl and not urlCache[originalUrl] then
+        TriggerServerEvent('radioweb:requestTrackInfo', originalUrl)
+        pendingPlays[originalUrl] = {
+            vehicleNetId = vehicleNetId,
+            stationId = stationId,
+            trackData = trackData,
+            trackIndex = trackIndex,
+            markState = markState
+        }
+        return
+    end
+
+    local vehicle = NetworkGetEntityFromNetworkId(vehicleNetId)
+    if not DoesEntityExist(vehicle) then
+        return
+    end
+
+    local playerPed = PlayerPedId()
+    local coords = GetEntityCoords(vehicle)
+    local volume = getVolume(IsPedInVehicle(playerPed, vehicle, false))
+    local soundName = 'car_radio_' .. vehicleNetId
+
+    currentRadio = 'c:' .. tostring(stationId or -1)
+    currentRadioType = 'custom'
+    customSource = { url = originalUrl, playUrl = resolvedUrl, title = trackData.title }
+    currentSong = (trackData.title and trackData.title ~= '') and trackData.title or originalUrl
+
+    local duration = trackData.duration or trackData.length or trackData.maxDuration
+    if duration and duration < 1000 then
+        duration = duration * 1000 -- assume seconds if very small
+    end
+    if not duration then
+        duration = durationCache[originalUrl]
+        if not duration then
+            TriggerServerEvent('radioweb:requestTrackInfo', originalUrl)
+        end
+    end
+    local fallbackDuration = 240000 -- 4 minutes fallback for streams without metadata
+    duration = duration or fallbackDuration
+
+    if markState then
+        playlistState[vehicleNetId] = {
+            stationId = stationId,
+            index = trackIndex or 1,
+            tracks = markState.tracks or playlistState[vehicleNetId] and playlistState[vehicleNetId].tracks or {},
+            startedAt = GetGameTimer(),
+            duration = duration,
+            lastAdvance = 0
+        }
+    else
+        local state = playlistState[vehicleNetId] or {}
+        state.stationId = stationId
+        state.index = trackIndex or state.index or 1
+        state.startedAt = GetGameTimer()
+        state.duration = duration
+        state.lastAdvance = state.lastAdvance or 0
+        state.tracks = state.tracks or {}
+        playlistState[vehicleNetId] = state
+    end
+
+    xsound:PlayUrlPos(soundName, resolvedUrl, volume, coords, true)
+    xsound:setSoundDynamic(soundName, true)
+    xsound:Distance(soundName, 20.0)
+
+    local startTime = GetGameTimer()
+    local timeout = 5000 -- 5 seconds timeout
+    while true do
+        Citizen.Wait(100)
+        local info = xsound:getInfo(soundName)
+        if info and info.playing then
+            break
+        end
+        if GetGameTimer() - startTime > timeout then
+            return
+        end
+    end
+    pendingPlays[originalUrl] = nil
+
+    activeRadios[vehicleNetId] = true
+    sendNowPlaying(currentSong, getStationName(stationId))
 end
 
 -- Helper function to count table entries
@@ -173,14 +319,101 @@ AddEventHandler('radioweb:syncRadio', function(vehicleNetId, radioIndex)
         if radioIndex == 0 then
             StopRadio(vehicleNetId)
         else
+            customSource = nil
+            currentRadioType = 'global'
             PlayRadio(radioIndex, vehicleNetId)
         end
         -- Update volume for nearby players
         if not IsPedInVehicle(playerPed, vehicle, false) then
-            xsound:SetVolume('car_radio_' .. vehicleNetId, 0.1)
+            xsound:setVolume('car_radio_' .. vehicleNetId, getVolume(false))
         end
     else
         print('SyncRadio: Vehicle does not exist for netId', vehicleNetId)
+    end
+end)
+
+-- Sync custom URLs
+RegisterNetEvent('radioweb:syncCustomRadio')
+AddEventHandler('radioweb:syncCustomRadio', function(vehicleNetId, url, title, customId)
+    local vehicle = NetworkGetEntityFromNetworkId(vehicleNetId)
+    if DoesEntityExist(vehicle) then
+        customSource = { url = url, title = title }
+        currentRadioType = 'custom'
+        PlayCustomTrack(vehicleNetId, customId, { url = url, title = title }, 1, { tracks = { { url = url, title = title } } })
+        if not IsPedInVehicle(PlayerPedId(), vehicle, false) then
+            xsound:setVolume('car_radio_' .. vehicleNetId, getVolume(false))
+        end
+    else
+        print('SyncCustomRadio: Vehicle does not exist for netId', vehicleNetId)
+    end
+end)
+
+-- Sync custom station with playlist
+RegisterNetEvent('radioweb:syncCustomStation')
+AddEventHandler('radioweb:syncCustomStation', function(vehicleNetId, station)
+    local vehicle = NetworkGetEntityFromNetworkId(vehicleNetId)
+    if not DoesEntityExist(vehicle) then
+        print('SyncCustomStation: Vehicle does not exist for netId', vehicleNetId)
+        return
+    end
+    if not station or not station.tracks or #station.tracks == 0 then
+        print('SyncCustomStation: Invalid station data')
+        return
+    end
+    playlistState[vehicleNetId] = { stationId = station.id, index = 1, tracks = station.tracks }
+    PlayCustomTrack(vehicleNetId, station.id, station.tracks[1], 1, playlistState[vehicleNetId])
+end)
+
+RegisterNetEvent('radioweb:syncCustomStationIndex')
+AddEventHandler('radioweb:syncCustomStationIndex', function(vehicleNetId, stationId, index)
+    local state = playlistState[vehicleNetId]
+    if state and state.stationId == stationId and state.tracks and #state.tracks > 0 then
+        local safeIndex = index
+        if safeIndex < 1 or safeIndex > #state.tracks then
+            safeIndex = 1
+        end
+        state.index = safeIndex
+        PlayCustomTrack(vehicleNetId, stationId, state.tracks[safeIndex], safeIndex, state)
+    end
+end)
+
+-- Receive duration info
+RegisterNetEvent('radioweb:receiveTrackInfo')
+AddEventHandler('radioweb:receiveTrackInfo', function(url, durationMs, resolvedUrl, formats)
+    if url and durationMs and durationMs > 0 then
+        durationCache[url] = durationMs
+        -- Update current playing state if matches
+        for vehicleNetId, state in pairs(playlistState) do
+            if state.tracks and state.index and state.tracks[state.index] and state.tracks[state.index].url == url then
+                state.duration = durationMs
+                state.startedAt = GetGameTimer()
+            end
+            if state.tracks then
+                for _, track in ipairs(state.tracks) do
+                    if track.url == url then
+                        track.duration = durationMs
+                        if resolvedUrl then
+                            track.resolvedUrl = resolvedUrl
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if url and resolvedUrl and resolvedUrl ~= '' then
+        urlCache[url] = resolvedUrl
+        -- Update current playback source
+        if customSource and customSource.url == url then
+            customSource.playUrl = resolvedUrl
+        end
+    end
+
+    -- Resume pending SoundCloud plays once we have a resolved URL
+    if url and resolvedUrl and pendingPlays[url] then
+        local pending = pendingPlays[url]
+        pending.trackData.resolvedUrl = resolvedUrl
+        PlayCustomTrack(pending.vehicleNetId, pending.stationId, pending.trackData, pending.trackIndex, pending.markState)
+        pendingPlays[url] = nil
     end
 end)
 
@@ -189,8 +422,9 @@ RegisterCommand('radio', function(source, args, rawCommand)
     local playerPed = PlayerPedId()
     local vehicle = GetVehiclePedIsIn(playerPed, false)
     if vehicle ~= 0 and not IsVehicleBlacklisted(vehicle) then
+        TriggerServerEvent('radioweb:requestCustomRadios')
         if not uiVisible then
-            ShowUI()
+            ShowUI(true)
         else
             HideUI()
         end
@@ -213,24 +447,43 @@ Citizen.CreateThread(function()
                 currentVehicle = vehicle
                 SetVehRadioStation(vehicle, "OFF") -- Disable in-game radio
                 SendNUIMessage({ type = 'enable' })
-                StopRadio(NetworkGetNetworkIdFromEntity(currentVehicle)) -- Ensure custom radio is off by default
+                TriggerServerEvent('radioweb:requestCustomRadios')
+                local vehicleNetId = NetworkGetNetworkIdFromEntity(vehicle)
+                if activeRadios[vehicleNetId] and xsound:getInfo('car_radio_' .. vehicleNetId) then
+                    xsound:setVolume('car_radio_' .. vehicleNetId, getVolume(true))
+                end
+            else
+                currentVehicle = vehicle
+                local vehicleNetId = NetworkGetNetworkIdFromEntity(vehicle)
+                if activeRadios[vehicleNetId] and xsound:getInfo('car_radio_' .. vehicleNetId) then
+                    xsound:setVolume('car_radio_' .. vehicleNetId, getVolume(true))
+                end
             end
             
             if isInVehicle and Config.EnableUIKey and IsControlJustPressed(0, Config.UIKey) then
                 if not uiVisible then
-                    ShowUI()
+                    ShowUI(true)
                 else
                     HideUI()
                 end
             end
         else
             if isInVehicle then
+                local wasDriver = currentVehicle and GetPedInVehicleSeat(currentVehicle, -1) == PlayerPedId()
+                if wasDriver then
+                    StopRadio(currentVehicle and NetworkGetNetworkIdFromEntity(currentVehicle) or 0)
+                else
+                    local netId = currentVehicle and NetworkGetNetworkIdFromEntity(currentVehicle)
+                    if netId and xsound:getInfo('car_radio_' .. netId) then
+                        xsound:setVolume('car_radio_' .. netId, getVolume(false))
+                    end
+                end
                 isInVehicle = false
-                StopRadio(currentVehicle and NetworkGetNetworkIdFromEntity(currentVehicle) or 0)
                 SendNUIMessage({ type = 'disable' })
                 if uiVisible then
                     HideUI()
                 end
+                currentVehicle = nil
             end
         end
     end
@@ -239,7 +492,7 @@ end)
 -- Only update radio position for the local player’s vehicle
 Citizen.CreateThread(function()
     while true do
-        Citizen.Wait(200) -- Every 30 seconds
+        Citizen.Wait(100) -- Every 30 seconds
         local playerPed = PlayerPedId()
         local vehicle = GetVehiclePedIsIn(playerPed, false)
 
@@ -247,15 +500,33 @@ Citizen.CreateThread(function()
             local vehicleNetId = NetworkGetNetworkIdFromEntity(vehicle)
             if activeRadios[vehicleNetId] then
                 local soundName = 'car_radio_' .. vehicleNetId
-                local coords = GetEntityCoords(PlayerPedId(), false)
+                local coords = GetEntityCoords(vehicle)
                 local info = xsound:getInfo(soundName)
 
                 if info and info.playing then
                     xsound:Position(soundName, coords)
                 else
-                    if currentRadio and radioStations[currentRadio] then
-                        local volume = 0.5
+                    if currentRadioType == 'global' and currentRadio and radioStations[currentRadio] then
+                        local volume = getVolume(IsPedInVehicle(PlayerPedId(), vehicle, false))
                         xsound:PlayUrlPos(soundName, radioStations[currentRadio].url, volume, coords, true)
+                        xsound:Distance(soundName, 20.0)
+
+                        local startTime = GetGameTimer()
+                        while true do
+                            Citizen.Wait(100)
+                            local newInfo = xsound:getInfo(soundName)
+                            if newInfo and newInfo.playing then
+                                break
+                            end
+                            if GetGameTimer() - startTime > 5000 then
+                                activeRadios[vehicleNetId] = nil
+                                break
+                            end
+                        end
+                    elseif currentRadioType == 'custom' and customSource then
+                        local volume = getVolume(IsPedInVehicle(PlayerPedId(), vehicle, false))
+                        local playUrl = customSource.playUrl or urlCache[customSource.url] or customSource.url
+                        xsound:PlayUrlPos(soundName, playUrl, volume, coords, true)
                         xsound:Distance(soundName, 20.0)
 
                         local startTime = GetGameTimer()
@@ -276,18 +547,214 @@ Citizen.CreateThread(function()
                 end
             end
         end
+
+        -- Playlist progression (driver handles advancing)
+        if isInVehicle and currentVehicle and currentRadioType == 'custom' then
+            local vehicleNetId = NetworkGetNetworkIdFromEntity(currentVehicle)
+            local state = playlistState[vehicleNetId]
+            if state and state.tracks and #state.tracks > 0 then
+                local soundName = 'car_radio_' .. vehicleNetId
+                local info = xsound:getInfo(soundName)
+                local shouldAdvance = false
+
+                if info then
+                    local dur = asNumber(info.duration) or asNumber(info.length) or asNumber(info.maxDuration)
+                    local pos = asNumber(info.time) or asNumber(info.position) or asNumber(info.seek)
+                    if dur and dur < 1000 then dur = dur * 1000 end -- normalize seconds to ms
+                    if pos and pos < 1000 then pos = pos * 1000 end
+                    if not info.playing then
+                        shouldAdvance = true
+                    elseif dur and pos and dur > 0 and pos >= (dur - 1500) then
+                        shouldAdvance = true
+                    end
+                else
+                    shouldAdvance = true
+                end
+
+                -- Fallback: no metadata or stream stuck; use tracked duration timer
+                if not shouldAdvance and state.duration and state.startedAt then
+                    local durMs = asNumber(state.duration)
+                    if durMs and durMs < 1000 then durMs = durMs * 1000 end
+                    local elapsed = GetGameTimer() - state.startedAt
+                    if durMs and durMs > 0 and elapsed >= (durMs - 1000) then
+                        shouldAdvance = true
+                    end
+                end
+
+                if shouldAdvance and GetPedInVehicleSeat(currentVehicle, -1) == PlayerPedId() then
+                    local now = GetGameTimer()
+                    state.lastAdvance = state.lastAdvance or 0
+                    if now - state.lastAdvance > 1000 then -- debounce within 1s
+                        state.lastAdvance = now
+                        local nextIndex = state.index + 1
+                        if nextIndex > #state.tracks then
+                            nextIndex = 1
+                        end
+                        state.index = nextIndex
+                        state.startedAt = GetGameTimer()
+                        PlayCustomTrack(vehicleNetId, state.stationId, state.tracks[nextIndex], nextIndex, state)
+                        TriggerServerEvent('radioweb:syncPlaylistIndex', vehicleNetId, state.stationId, nextIndex)
+                    end
+                end
+            end
+        end
     end
 end)
 
 
 -- NUI callback for radio selection
 RegisterNUICallback('selectRadio', function(data, cb)
-    local index = tonumber(data.index)
+    local value = tostring(data.index)
+    if not isInVehicle or not currentVehicle then
+        print('selectRadio: Not in vehicle or no current vehicle')
+        cb('ok')
+        return
+    end
+
+    local vehicleNetId = NetworkGetNetworkIdFromEntity(currentVehicle)
+
+    if value == '0' then
+        TriggerServerEvent('radioweb:selectRadio', vehicleNetId, 0)
+    elseif string.sub(value, 1, 2) == 'c:' then
+        local customId = tonumber(string.sub(value, 3))
+        if customId then
+            TriggerServerEvent('radioweb:playCustomStation', vehicleNetId, customId)
+        end
+    elseif string.sub(value, 1, 2) == 'g:' then
+        local index = tonumber(string.sub(value, 3))
+        if index then
+            TriggerServerEvent('radioweb:selectRadio', vehicleNetId, index)
+        end
+    else
+        local index = tonumber(value)
+        if index then
+            TriggerServerEvent('radioweb:selectRadio', vehicleNetId, index)
+        end
+    end
+    cb('ok')
+end)
+
+-- NUI callback for custom URL
+RegisterNUICallback('playCustom', function(data, cb)
+    local url = tostring(data.url or '')
+    local title = tostring(data.title or '')
+    if url == '' then
+        cb('no_url')
+        return
+    end
     if isInVehicle and currentVehicle then
         local vehicleNetId = NetworkGetNetworkIdFromEntity(currentVehicle)
-        TriggerServerEvent('radioweb:selectRadio', vehicleNetId, index)
+        TriggerServerEvent('radioweb:playCustomRadio', vehicleNetId, url, title)
     else
-        print('selectRadio: Not in vehicle or no current vehicle')
+        print('playCustom: Not in vehicle or no current vehicle')
+    end
+    cb('ok')
+end)
+
+-- NUI callback to close UI
+RegisterNUICallback('closeUI', function(_, cb)
+    HideUI()
+    cb('ok')
+end)
+
+-- NUI callback to stop radio
+RegisterNUICallback('stopRadio', function(_, cb)
+    if isInVehicle and currentVehicle then
+        local vehicleNetId = NetworkGetNetworkIdFromEntity(currentVehicle)
+        TriggerServerEvent('radioweb:selectRadio', vehicleNetId, 0)
+    else
+        print('stopRadio: Not in vehicle or no current vehicle')
+    end
+    cb('ok')
+end)
+
+-- NUI callback to create custom station
+RegisterNUICallback('createCustom', function(data, cb)
+    local tracks = data.tracks
+    local stationName = tostring(data.stationName or '')
+    local isPublic = data.isPublic and true or false
+
+    if stationName == '' then
+        cb('missing_fields')
+        return
+    end
+
+    if type(tracks) ~= 'table' then
+        tracks = {}
+    end
+
+    TriggerServerEvent('radioweb:createCustomRadio', nil, nil, isPublic, tracks, stationName)
+    cb('ok')
+end)
+
+-- NUI callback to delete custom station
+RegisterNUICallback('deleteCustom', function(data, cb)
+    local id = tonumber(data.id)
+    if not id then
+        cb('no_id')
+        return
+    end
+    TriggerServerEvent('radioweb:deleteCustomRadio', id)
+    cb('ok')
+end)
+
+-- NUI callback to add track to existing station
+RegisterNUICallback('addTrack', function(data, cb)
+    local id = tonumber(data.id)
+    local title = tostring(data.title or '')
+    local url = tostring(data.url or '')
+    if not id or title == '' or url == '' then
+        cb('missing_fields')
+        return
+    end
+    TriggerServerEvent('radioweb:addTrackToStation', id, title, url)
+    cb('ok')
+end)
+
+-- NUI callback to update track
+RegisterNUICallback('updateTrack', function(data, cb)
+    local id = tonumber(data.id)
+    local index = tonumber(data.index)
+    local title = tostring(data.title or '')
+    local url = tostring(data.url or '')
+    if not id or not index or title == '' or url == '' then
+        cb('missing_fields')
+        return
+    end
+    TriggerServerEvent('radioweb:updateTrackInStation', id, index, title, url)
+    cb('ok')
+end)
+
+-- NUI callback to remove track
+RegisterNUICallback('removeTrack', function(data, cb)
+    local id = tonumber(data.id)
+    local index = tonumber(data.index)
+    if not id or not index then
+        cb('missing_fields')
+        return
+    end
+    TriggerServerEvent('radioweb:removeTrackFromStation', id, index)
+    cb('ok')
+end)
+
+-- NUI callback to set volume (0-100)
+RegisterNUICallback('setVolume', function(data, cb)
+    local vol = tonumber(data.volume) or 100
+    vol = math.max(0, math.min(100, vol))
+    userVolume = vol / 100.0
+    -- apply to current sound if present
+    local soundName = nil
+    local vehicle = currentVehicle
+    if vehicle and DoesEntityExist(vehicle) then
+        soundName = 'car_radio_' .. NetworkGetNetworkIdFromEntity(vehicle)
+    end
+    if soundName and xsound:getInfo(soundName) then
+        local inVeh = IsPedInVehicle(PlayerPedId(), vehicle, false)
+        xsound:setVolume(soundName, getVolume(inVeh))
+    end
+    -- only push back to UI when not a live scrub to avoid loops
+    if not data.live then
+        SendNUIMessage({ type = 'volume', value = vol })
     end
     cb('ok')
 end)
