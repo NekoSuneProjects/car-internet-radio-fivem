@@ -16,6 +16,31 @@ local urlCache = {}
 local pendingPlays = {}
 local userVolume = 1.0
 
+local function urlEncode(value)
+    if not value then return '' end
+    return (value:gsub('\n', '\r\n'):gsub('([^%w%-_%.~])', function(c)
+        return string.format('%%%02X', string.byte(c))
+    end))
+end
+
+local function buildCustomProxyUrls(rawUrl)
+    local urls = {}
+    if not rawUrl or rawUrl == '' then
+        return urls
+    end
+    local encoded = urlEncode(rawUrl)
+    local nodes = Config.CustomStreamNodes or {
+        'https://dl.nekosunevr.co.uk',
+        'https://dl.ballisticok.xyz'
+    }
+    for _, node in ipairs(nodes) do
+        if node and node ~= '' then
+            table.insert(urls, node .. '/api/stream?url=' .. encoded)
+        end
+    end
+    return urls
+end
+
 local function asNumber(val)
     if type(val) == 'number' then
         return val
@@ -242,10 +267,11 @@ local function PlayCustomTrack(vehicleNetId, stationId, trackData, trackIndex, m
     local coords = GetEntityCoords(vehicle)
     local volume = getVolume(IsPedInVehicle(playerPed, vehicle, false))
     local soundName = 'car_radio_' .. vehicleNetId
+    local playUrls = buildCustomProxyUrls(originalUrl)
 
     currentRadio = 'c:' .. tostring(stationId or -1)
     currentRadioType = 'custom'
-    customSource = { url = originalUrl, playUrl = resolvedUrl, title = trackData.title }
+    customSource = { url = originalUrl, playUrl = playUrls[1], title = trackData.title }
     currentSong = (trackData.title and trackData.title ~= '') and trackData.title or originalUrl
 
     local duration = trackData.duration or trackData.length or trackData.maxDuration
@@ -281,22 +307,39 @@ local function PlayCustomTrack(vehicleNetId, stationId, trackData, trackIndex, m
         playlistState[vehicleNetId] = state
     end
 
-    xsound:PlayUrlPos(soundName, resolvedUrl, volume, coords, true)
-    xsound:setSoundDynamic(soundName, true)
-    xsound:Distance(soundName, 20.0)
+    local played = false
+    local selectedPlayUrl = nil
+    if #playUrls == 0 then
+        playUrls = { resolvedUrl }
+    end
+    for _, playUrl in ipairs(playUrls) do
+        xsound:PlayUrlPos(soundName, playUrl, volume, coords, true)
+        xsound:setSoundDynamic(soundName, true)
+        xsound:Distance(soundName, 20.0)
 
-    local startTime = GetGameTimer()
-    local timeout = 5000 -- 5 seconds timeout
-    while true do
-        Citizen.Wait(100)
-        local info = xsound:getInfo(soundName)
-        if info and info.playing then
+        local startTime = GetGameTimer()
+        local timeout = 5000 -- 5 seconds timeout
+        while true do
+            Citizen.Wait(100)
+            local info = xsound:getInfo(soundName)
+            if info and info.playing then
+                played = true
+                selectedPlayUrl = playUrl
+                break
+            end
+            if GetGameTimer() - startTime > timeout then
+                xsound:Destroy(soundName)
+                break
+            end
+        end
+        if played then
             break
         end
-        if GetGameTimer() - startTime > timeout then
-            return
-        end
     end
+    if not played then
+        return
+    end
+    customSource.playUrl = selectedPlayUrl
     pendingPlays[originalUrl] = nil
 
     activeRadios[vehicleNetId] = true
@@ -404,7 +447,10 @@ AddEventHandler('radioweb:receiveTrackInfo', function(url, durationMs, resolvedU
         urlCache[url] = resolvedUrl
         -- Update current playback source
         if customSource and customSource.url == url then
-            customSource.playUrl = resolvedUrl
+            if not customSource.playUrl or customSource.playUrl == '' then
+                local proxyUrls = buildCustomProxyUrls(url)
+                customSource.playUrl = proxyUrls[1]
+            end
         end
     end
 
@@ -525,21 +571,46 @@ Citizen.CreateThread(function()
                         end
                     elseif currentRadioType == 'custom' and customSource then
                         local volume = getVolume(IsPedInVehicle(PlayerPedId(), vehicle, false))
-                        local playUrl = customSource.playUrl or urlCache[customSource.url] or customSource.url
-                        xsound:PlayUrlPos(soundName, playUrl, volume, coords, true)
-                        xsound:Distance(soundName, 20.0)
+                        local played = false
+                        local proxyUrls = buildCustomProxyUrls(customSource.url)
+                        local playUrls = {}
+                        if customSource.playUrl and customSource.playUrl ~= '' then
+                            table.insert(playUrls, customSource.playUrl)
+                        end
+                        for _, purl in ipairs(proxyUrls) do
+                            if purl ~= customSource.playUrl then
+                                table.insert(playUrls, purl)
+                            end
+                        end
+                        if #playUrls == 0 then
+                            table.insert(playUrls, urlCache[customSource.url] or customSource.url)
+                        end
 
-                        local startTime = GetGameTimer()
-                        while true do
-                            Citizen.Wait(100)
-                            local newInfo = xsound:getInfo(soundName)
-                            if newInfo and newInfo.playing then
+                        for _, playUrl in ipairs(playUrls) do
+                            xsound:PlayUrlPos(soundName, playUrl, volume, coords, true)
+                            xsound:Distance(soundName, 20.0)
+
+                            local startTime = GetGameTimer()
+                            while true do
+                                Citizen.Wait(100)
+                                local newInfo = xsound:getInfo(soundName)
+                                if newInfo and newInfo.playing then
+                                    customSource.playUrl = playUrl
+                                    played = true
+                                    break
+                                end
+                                if GetGameTimer() - startTime > 5000 then
+                                    xsound:Destroy(soundName)
+                                    break
+                                end
+                            end
+                            if played then
                                 break
                             end
-                            if GetGameTimer() - startTime > 5000 then
-                                activeRadios[vehicleNetId] = nil
-                                break
-                            end
+                        end
+
+                        if not played then
+                            activeRadios[vehicleNetId] = nil
                         end
                     else
                         activeRadios[vehicleNetId] = nil

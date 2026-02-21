@@ -22,3 +22,9 @@ Config.UIKey = 38 -- Key to open radio (default: E)
 
 -- Enable/disable E key for UI toggle (true = E key works, false = only /radio command)
 Config.EnableUIKey = true
+
+-- Custom track proxy nodes (first node is primary, next ones are fallback)
+Config.CustomStreamNodes = {
+    'https://dl.nekosunevr.co.uk',
+    'https://dl.ballisticok.xyz'
+}
