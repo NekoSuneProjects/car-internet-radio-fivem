@@ -35,7 +35,7 @@ local function buildCustomProxyUrls(rawUrl)
     }
     for _, node in ipairs(nodes) do
         if node and node ~= '' then
-            table.insert(urls, node .. '/api/stream?url=' .. encoded)
+            table.insert(urls, node .. '/api/stream?format=mp3&url=' .. encoded)
         end
     end
     return urls
