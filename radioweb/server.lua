@@ -1,7 +1,6 @@
 -- Server-side logic for radio system
 local CUSTOM_FILE = 'custom_radios.json'
 local customRadios = { nextId = 1, stations = {} }
-local INFO_API = GetConvar('RADIO_INFO_API', 'https://ytdlp.nekosunevr.co.uk/info')
 
 local function isSoundcloud(url)
     return url and (string.find(url, 'soundcloud.com', 1, true) or string.find(url, 'sndcdn.com', 1, true))
@@ -11,44 +10,152 @@ local function urlEncode(str)
     return str and str:gsub("([^%w%-%_%.%~])", function(c) return string.format("%%%02X", string.byte(c)) end)
 end
 
+local function pickPlayableUrlForTrack(originalUrl, data)
+    if not data or type(data) ~= 'table' then
+        return nil
+    end
+
+    if data.url and data.url ~= '' then
+        return data.url
+    end
+
+    local lists = {
+        data.playable_formats,
+        data.formats
+    }
+
+    local firstAny = nil
+    local firstMp3 = nil
+    local firstAudioOnly = nil
+
+    for _, list in ipairs(lists) do
+        if type(list) == 'table' then
+            for _, f in ipairs(list) do
+                if f and f.url and f.url ~= '' then
+                    if not firstAny then
+                        firstAny = f.url
+                    end
+                    if isSoundcloud(originalUrl) and f.format_id == 'http_mp3_1_0' then
+                        return f.url
+                    end
+                    if not firstMp3 and (f.ext == 'mp3' or f.acodec == 'mp3') then
+                        firstMp3 = f.url
+                    end
+                    if not firstAudioOnly and (f.vcodec == 'none') then
+                        firstAudioOnly = f.url
+                    end
+                end
+            end
+        end
+    end
+
+    return firstMp3 or firstAudioOnly or firstAny
+end
+
+local function parseTrackInfoPayload(originalUrl, data)
+    if not data or type(data) ~= 'table' then
+        return nil, nil, nil, nil
+    end
+
+    local durationSeconds = tonumber(data.duration)
+    local durationMs = nil
+    if durationSeconds and durationSeconds > 0 then
+        durationMs = math.floor(durationSeconds * 1000)
+    end
+
+    local durationString = nil
+    if type(data.duration_string) == 'string' and data.duration_string ~= '' then
+        durationString = data.duration_string
+    end
+    if not durationMs and durationString then
+        local parts = {}
+        for p in string.gmatch(durationString, '(%d+)') do
+            table.insert(parts, tonumber(p) or 0)
+        end
+        if #parts == 2 then
+            durationMs = ((parts[1] * 60) + parts[2]) * 1000
+        elseif #parts == 3 then
+            durationMs = ((parts[1] * 3600) + (parts[2] * 60) + parts[3]) * 1000
+        end
+    end
+
+    local playUrl = pickPlayableUrlForTrack(originalUrl, data)
+
+    local formats = nil
+    if data.formats and type(data.formats) == 'table' then
+        formats = {}
+        for _, f in ipairs(data.formats) do
+            table.insert(formats, {
+                format_id = f.format_id,
+                url = f.url,
+                abr = f.abr,
+                ext = f.ext,
+                acodec = f.acodec,
+                vcodec = f.vcodec
+            })
+        end
+    end
+
+    return durationMs, durationString, playUrl, formats
+end
+
+local function buildInfoEndpoints(encodedUrl)
+    local endpoints = {}
+    local seen = {}
+
+    local function addEndpoint(base)
+        if not base or base == '' then
+            return
+        end
+        local endpoint = base .. '?url=' .. encodedUrl
+        if not seen[endpoint] then
+            seen[endpoint] = true
+            table.insert(endpoints, endpoint)
+        end
+    end
+
+    if Config and type(Config.CustomStreamNodes) == 'table' then
+        for _, node in ipairs(Config.CustomStreamNodes) do
+            if node and node ~= '' then
+                addEndpoint(node .. '/info')
+            end
+        end
+    end
+
+    return endpoints
+end
+
 local function fetchTrackDuration(url, cb)
     if not url or url == '' then
-        cb(nil, nil, nil)
+        cb(nil, nil, nil, nil)
         return
     end
     local encoded = urlEncode(url)
     if not encoded then
-        cb(nil, nil, nil)
+        cb(nil, nil, nil, nil)
         return
     end
-    local endpoint = INFO_API .. '?url=' .. encoded
-    PerformHttpRequest(endpoint, function(status, response, headers)
-        if status == 200 and response then
-            local ok, data = pcall(json.decode, response)
-            if ok and data and data.duration then
-                local ms = math.floor((tonumber(data.duration) or 0) * 1000)
-                local playUrl = nil
-                local formats = nil
-                if data.formats and type(data.formats) == 'table' then
-                    formats = {}
-                    for _, f in ipairs(data.formats) do
-                        table.insert(formats, {
-                            format_id = f.format_id,
-                            url = f.url,
-                            abr = f.abr,
-                            ext = f.ext
-                        })
-                        if not playUrl and isSoundcloud(url) and f.format_id == 'http_mp3_1_0' and f.url then
-                            playUrl = f.url
-                        end
-                    end
-                end
-                cb(ms > 0 and ms or nil, playUrl, formats)
-                return
-            end
+    local endpoints = buildInfoEndpoints(encoded)
+    local function tryEndpoint(index)
+        if not endpoints[index] then
+            cb(nil, nil, nil, nil)
+            return
         end
-        cb(nil, nil, nil)
-    end, 'GET', '', { ['Content-Type'] = 'application/json' })
+
+        PerformHttpRequest(endpoints[index], function(status, response, headers)
+            if status == 200 and response then
+                local ok, data = pcall(json.decode, response)
+                if ok and data then
+                    local durationMs, durationString, playUrl, formats = parseTrackInfoPayload(url, data)
+                    cb(durationMs, durationString, playUrl, formats)
+                    return
+                end
+            end
+            tryEndpoint(index + 1)
+        end, 'GET', '', { ['Content-Type'] = 'application/json' })
+    end
+
+    tryEndpoint(1)
 end
 
 local function loadCustomRadios()
@@ -184,10 +291,16 @@ AddEventHandler('radioweb:addTrackToStation', function(stationId, title, url)
     if not stationId or not url or url == '' or not title or title == '' then
         return
     end
-    fetchTrackDuration(url, function(durationMs, playUrl)
+    fetchTrackDuration(url, function(durationMs, durationString, playUrl)
         for _, station in ipairs(customRadios.stations) do
             if station.id == stationId and station.owner == identifier then
-                table.insert(station.tracks, { title = title, url = url, duration = durationMs, resolvedUrl = playUrl })
+                table.insert(station.tracks, {
+                    title = title,
+                    url = url,
+                    duration = durationMs,
+                    duration_string = durationString,
+                    resolvedUrl = playUrl
+                })
                 saveCustomRadios()
                 break
             end
@@ -207,10 +320,16 @@ AddEventHandler('radioweb:updateTrackInStation', function(stationId, index, titl
     if not stationId or not index or not title or title == '' or not url or url == '' then
         return
     end
-    fetchTrackDuration(url, function(durationMs, playUrl)
+    fetchTrackDuration(url, function(durationMs, durationString, playUrl)
         for _, station in ipairs(customRadios.stations) do
             if station.id == stationId and station.owner == identifier and station.tracks and station.tracks[index] then
-                station.tracks[index] = { title = title, url = url, duration = durationMs, resolvedUrl = playUrl }
+                station.tracks[index] = {
+                    title = title,
+                    url = url,
+                    duration = durationMs,
+                    duration_string = durationString,
+                    resolvedUrl = playUrl
+                }
                 saveCustomRadios()
                 break
             end
@@ -248,53 +367,26 @@ RegisterServerEvent('radioweb:requestTrackInfo')
 AddEventHandler('radioweb:requestTrackInfo', function(url)
     local src = source
     if not url or url == '' then
-        TriggerClientEvent('radioweb:receiveTrackInfo', src, url, nil)
+        TriggerClientEvent('radioweb:receiveTrackInfo', src, url, nil, nil, nil, nil)
         return
     end
-    local encoded = url
-    encoded = encoded:gsub("([^%w%-%_%.%~])", function(c) return string.format("%%%02X", string.byte(c)) end)
-    local endpoint = INFO_API .. '?url=' .. encoded
-    PerformHttpRequest(endpoint, function(status, response, headers)
-        if status == 200 and response then
-            local ok, data = pcall(json.decode, response)
-            if ok and data and data.duration then
-                -- try to persist duration into stored stations
-                local durationMs = math.floor((tonumber(data.duration) or 0) * 1000)
-                local playUrl = nil
-                local formats = nil
-                if data.formats and type(data.formats) == 'table' then
-                    formats = {}
-                    for _, f in ipairs(data.formats) do
-                        table.insert(formats, {
-                            format_id = f.format_id,
-                            url = f.url,
-                            abr = f.abr,
-                            ext = f.ext
-                        })
-                        if not playUrl and isSoundcloud(url) and f.format_id == 'http_mp3_1_0' and f.url then
-                            playUrl = f.url
+    fetchTrackDuration(url, function(durationMs, durationString, playUrl, formats)
+        for _, station in ipairs(customRadios.stations) do
+            if station.tracks then
+                for _, track in ipairs(station.tracks) do
+                    if track.url == url then
+                        track.duration = durationMs
+                        track.duration_string = durationString
+                        if playUrl then
+                            track.resolvedUrl = playUrl
                         end
                     end
                 end
-                for _, station in ipairs(customRadios.stations) do
-                    if station.tracks then
-                        for _, track in ipairs(station.tracks) do
-                            if track.url == url then
-                                track.duration = durationMs
-                                if playUrl then
-                                    track.resolvedUrl = playUrl
-                                end
-                            end
-                        end
-                    end
-                end
-                saveCustomRadios()
-                TriggerClientEvent('radioweb:receiveTrackInfo', src, url, durationMs, playUrl, formats)
-                return
             end
         end
-        TriggerClientEvent('radioweb:receiveTrackInfo', src, url, nil, nil, nil)
-    end, 'GET', '', { ['Content-Type'] = 'application/json' })
+        saveCustomRadios()
+        TriggerClientEvent('radioweb:receiveTrackInfo', src, url, durationMs, durationString, playUrl, formats)
+    end)
 end)
 
 -- Delete custom station

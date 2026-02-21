@@ -35,7 +35,7 @@ local function buildCustomProxyUrls(rawUrl)
     }
     for _, node in ipairs(nodes) do
         if node and node ~= '' then
-            table.insert(urls, node .. '/api/stream?format=mp3&url=' .. encoded)
+            table.insert(urls, node .. '/api/stream?url=' .. encoded .. '&format=mp3')
         end
     end
     return urls
@@ -44,6 +44,23 @@ end
 local function asNumber(val)
     if type(val) == 'number' then
         return val
+    end
+    return nil
+end
+
+local function durationStringToMs(value)
+    if type(value) ~= 'string' or value == '' then
+        return nil
+    end
+    local parts = {}
+    for p in string.gmatch(value, '(%d+)') do
+        table.insert(parts, tonumber(p) or 0)
+    end
+    if #parts == 2 then
+        return ((parts[1] * 60) + parts[2]) * 1000
+    end
+    if #parts == 3 then
+        return ((parts[1] * 3600) + (parts[2] * 60) + parts[3]) * 1000
     end
     return nil
 end
@@ -275,6 +292,9 @@ local function PlayCustomTrack(vehicleNetId, stationId, trackData, trackIndex, m
     currentSong = (trackData.title and trackData.title ~= '') and trackData.title or originalUrl
 
     local duration = trackData.duration or trackData.length or trackData.maxDuration
+    if not duration then
+        duration = durationStringToMs(trackData.duration_string)
+    end
     if duration and duration < 1000 then
         duration = duration * 1000 -- assume seconds if very small
     end
@@ -422,7 +442,7 @@ end)
 
 -- Receive duration info
 RegisterNetEvent('radioweb:receiveTrackInfo')
-AddEventHandler('radioweb:receiveTrackInfo', function(url, durationMs, resolvedUrl, formats)
+AddEventHandler('radioweb:receiveTrackInfo', function(url, durationMs, durationString, resolvedUrl, formats)
     if url and durationMs and durationMs > 0 then
         durationCache[url] = durationMs
         -- Update current playing state if matches
@@ -435,6 +455,9 @@ AddEventHandler('radioweb:receiveTrackInfo', function(url, durationMs, resolvedU
                 for _, track in ipairs(state.tracks) do
                     if track.url == url then
                         track.duration = durationMs
+                        if durationString and durationString ~= '' then
+                            track.duration_string = durationString
+                        end
                         if resolvedUrl then
                             track.resolvedUrl = resolvedUrl
                         end
